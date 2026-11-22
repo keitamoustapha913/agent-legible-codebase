@@ -1,4 +1,5 @@
 """Exercise the live smoke acceptance criteria with offline traces."""
+import argparse
 import json
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from discovery_smoke import SOURCE_FILE, SYMBOL, check_trace
+from benchmark_codex import navigation_config
 
 
 def tool(name, arguments, output):
@@ -20,6 +22,13 @@ def tool(name, arguments, output):
 
 
 class DiscoverySmokeTests(unittest.TestCase):
+    def test_dotted_fixture_path_is_an_inline_project_key(self):
+        repo = Path("/tmp/alc-smoke/.fixture-123/repo")
+        options = argparse.Namespace(mode="discovery", manifest=repo.parent / "controller-only.json")
+        args = navigation_config(options, repo)
+        overrides = [value for value in args if value.startswith(("projects.", "projects="))]
+        self.assertEqual(overrides, [f'projects={{{json.dumps(str(repo))}={{trust_level="untrusted"}}}}'])
+
     def test_requires_search_read_and_correct_model_answer(self):
         witness = "random-value"
         search = tool("search", {"query": SYMBOL}, f"{SOURCE_FILE}:1:def {SYMBOL}():")

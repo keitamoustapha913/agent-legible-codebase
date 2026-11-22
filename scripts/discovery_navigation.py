@@ -11,13 +11,18 @@ from discovery_oracle import resolved_file
 
 MAX_RESPONSE = 16000
 MAX_FILE = 512 * 1024
+# Codex treats tools without these hints as potentially mutating or external.
+READ_ONLY_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 TOOLS = [
     {"name": "list_files", "description": "List tracked paths, optionally using a literal path substring.",
+     "annotations": READ_ONLY_ANNOTATIONS,
      "inputSchema": {"type": "object", "properties": {"contains": {"type": ["string", "null"]}}, "additionalProperties": False}},
     {"name": "search", "description": "Find a literal snippet in tracked text files. Returns path, line number and match.",
+     "annotations": READ_ONLY_ANNOTATIONS,
      "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "contains": {"type": ["string", "null"]}},
                      "required": ["query"], "additionalProperties": False}},
     {"name": "read", "description": "Read a tracked text file, optionally limiting to lines start through end.",
+     "annotations": READ_ONLY_ANNOTATIONS,
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "start": {"type": ["integer", "null"]},
                                                      "end": {"type": ["integer", "null"]}},
                      "required": ["path"], "additionalProperties": False}},

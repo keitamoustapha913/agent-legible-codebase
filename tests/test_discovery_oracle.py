@@ -11,6 +11,15 @@ import discovery_navigation
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_navigation_catalog_advertises_only_read_only_tools(self):
+        nav = discovery_navigation.Navigation(Path.cwd(), [])
+        response = discovery_navigation.dispatch({"id": 1, "method": "tools/list"}, nav)
+        tools = {tool["name"]: tool.get("annotations") for tool in response["result"]["tools"]}
+        self.assertEqual(tools, {
+            name: {"readOnlyHint": True, "openWorldHint": False}
+            for name in ("list_files", "search", "read")
+        })
+
     def test_graded_symbols_must_be_declared_in_the_submitted_file(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

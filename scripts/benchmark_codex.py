@@ -358,7 +358,8 @@ def navigation_config(opts: argparse.Namespace, cwd: Path, journal: Path | None 
         "-c", f"mcp_servers.alc_navigation.args={json.dumps(server_args)}",
         "-c", "mcp_servers.alc_navigation.required=true",
         "-c", "mcp_servers.alc_navigation.tool_timeout_sec=30",
-        "-c", f"projects.{json.dumps(str(cwd))}.trust_level=" + json.dumps("untrusted"),
+        # A checkout path may contain dots that Codex interprets as override separators.
+        "-c", f'projects={{{json.dumps(str(cwd))}={{trust_level="untrusted"}}}}',
     ]
 
 
