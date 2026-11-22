@@ -30,7 +30,18 @@ class BenchmarkTests(unittest.TestCase):
         ]}
         report, eligible = render_report(data)
         self.assertFalse(eligible)
-        self.assertIn("BLOCKED", report)
+        self.assertIn("REGRESSION", report)
+
+    def test_counterbalanced_plan_has_both_orders(self):
+        import benchmark_codex
+        tasks = [{"id": "date"}, {"id": "currency"}]
+        plan = benchmark_codex.plan_trials(tasks, 3, seed=42)
+        self.assertEqual(plan, benchmark_codex.plan_trials(tasks, 3, seed=42))
+        for task in tasks:
+            trials = [plan[i:i+2] for i in range(0, len(plan), 2) if plan[i][0] == task]
+            self.assertEqual(len(trials), 3)
+            self.assertEqual({pair[0][2] for pair in trials}, {"before", "after"})
+            self.assertTrue(all(a[:2] == b[:2] for a, b in trials))
 
     def test_end_to_end_fake_codex_uses_worktrees_and_checks(self):
         with tempfile.TemporaryDirectory() as td:
@@ -47,7 +58,8 @@ class BenchmarkTests(unittest.TestCase):
             manifest.write_text(json.dumps({"tasks": [{
                 "id": "change-value", "prompt": "Update the value function to return 2.",
                 "owners": {"before": ["calc.py"], "after": ["calc.py"]},
-                "success_checks": [[sys.executable, "-c", "import calc; assert calc.value() == 2"]],
+                "success_checks": [[sys.executable, "-c", "import calc; assert calc.value() == 2, \"VALUE_NOT_TWO\""]],
+                "expected_failure": {"regex": "^AssertionError: VALUE_NOT_TWO$"},
                 "regression_checks": [[sys.executable, "-c", "import calc; assert callable(calc.value)"]],
             }]}))
             fake = root / "fake-codex"
@@ -61,12 +73,18 @@ if '--version' in args:
 if 'exec' not in args or '--json' not in args:
     sys.exit(3)
 cwd = Path(args[args.index('--cd') + 1])
-sys.stdin.read()
+prompt = sys.stdin.read()
+if prompt.startswith("Run this one command"):
+    cmd = prompt.splitlines()[-1]
+    print(json.dumps({"type": "item.completed", "item": {"id": "smoke", "type": "command_execution",
+                                                        "command": cmd, "exit_code": 124}}))
+    print(json.dumps({"type": "turn.completed"}))
+    sys.exit(0)
 source = (cwd/'calc.py').read_text()
 (cwd/'calc.py').write_text(source.replace('return 1', 'return 2'))
 for event in [
     {'type': 'thread.started', 'thread_id': 'test'},
-    {'type': 'item.completed', 'item': {'id': '1', 'type': 'command_execution', 'command': 'cat calc.py', 'aggregated_output': source, 'exit_code': 0}},
+    {'type': 'item.completed', 'item': {'id': '1', 'type': 'command_execution', 'command': 'cat calc.py', 'aggregated_output': source, 'exit_code': 0, 'cwd': str(cwd)}},
     {'type': 'turn.completed', 'usage': {'input_tokens': 420, 'cached_input_tokens': 0, 'output_tokens': 15}},
 ]:
     print(json.dumps(event), flush=True)
@@ -75,22 +93,50 @@ for event in [
             out = root / "results"
             argv = [sys.executable, str(SCRIPTS / "benchmark_codex.py"), "--repo", str(repo),
                     "--manifest", str(manifest), "--before", "HEAD", "--after", "HEAD", "--out", str(out),
-                    "--trials", "1", "--codex", str(fake), "--model", "synthetic-test", "--timeout", "15"]
+                    "--trials", "1", "--approve-manifest", "--codex", str(fake), "--model", "synthetic-test", "--timeout", "15"]
             dry = subprocess.run(argv + ["--dry-run"], capture_output=True, text=True, check=False)
             self.assertEqual(dry.returncode, 0, dry.stderr)
             self.assertFalse(out.exists())
             run = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=90)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             data = json.loads((out / "results.json").read_text())
+            self.assertEqual(data.get("schema_version"), 4)
+            self.assertEqual(data["metadata"]["preflight_status"], "ready")
             self.assertEqual(len(data["runs"]), 2)
+            self.assertEqual([run["execution_order"] for run in data["runs"]], [1, 2])
+            self.assertEqual(len(subprocess.check_output(["git", "-C", str(repo), "worktree", "list", "--porcelain"]).split(b"worktree ")), 2)
             self.assertTrue(all(r["correct"] and r["verified"] for r in data["runs"]))
             self.assertTrue(all(r["total_input_tokens"] == 420 for r in data["runs"]))
+            self.assertTrue(all(r["confirmed_source_reads"] == 1 for r in data["runs"]))
+            self.assertNotIn("VALUE_NOT_TWO", (out / "results.json").read_text())
             self.assertEqual((repo / "calc.py").read_text(), "def value():\n    return 1\n")
             self.assertFalse(list(out.glob("*.jsonl")), "raw traces must be deleted by default")
             report = subprocess.run([sys.executable, str(SCRIPTS / "report_codex.py"), str(out / "results.json"),
                                      "--out", str(out / "report.md")], capture_output=True, text=True, check=False)
             self.assertEqual(report.returncode, 0, report.stderr)
             self.assertIn("Codex agent-navigation benchmark", (out / "report.md").read_text())
+            smoke = root / "smoke"
+            smoke_run = subprocess.run(argv + ["--out", str(smoke), "--sandbox-smoke"], capture_output=True,
+                                       text=True, check=False, timeout=90)
+            self.assertEqual(smoke_run.returncode, 2, smoke_run.stdout + smoke_run.stderr)
+            smoke_doc = json.loads((smoke / "results.json").read_text())
+            self.assertEqual(smoke_doc["metadata"]["preflight_status"], "ready")
+            self.assertEqual(smoke_doc["metadata"]["sandbox_smoke_status"], "environment_blocked")
+            self.assertEqual(smoke_doc["runs"], [])
+            self.assertIn("**INVALID**", (smoke / "report.md").read_text())
+
+            invalid = json.loads(manifest.read_text())
+            invalid["tasks"][0]["success_checks"][0] = [sys.executable, "-c", "import no_such_fixture_module"]
+            manifest.write_text(json.dumps(invalid))
+            invalid_out = root / "invalid"
+            invalid_run = subprocess.run(argv + ["--out", str(invalid_out)], capture_output=True,
+                                         text=True, check=False, timeout=90)
+            self.assertEqual(invalid_run.returncode, 2, invalid_run.stdout + invalid_run.stderr)
+            invalid_doc = json.loads((invalid_out / "results.json").read_text())
+            self.assertEqual(invalid_doc["metadata"]["preflight_status"], "preflight_invalid")
+            self.assertEqual(invalid_doc["runs"], [])
+            self.assertEqual(invalid_doc["metadata"]["host_preflight"][0]["success_checks"][0]["failure_reason"],
+                             "environment_error")
 
 
 if __name__ == "__main__":

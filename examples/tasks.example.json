@@ -4,15 +4,31 @@
       "id": "discount-subtotal-cap",
       "prompt": "Prevent a promotional discount from ever making an order total negative, including discounts larger than the subtotal. Preserve existing checkout behavior in all other cases.",
       "owners": {
-        "before": ["src/billing/discounts.ts"],
-        "after": ["src/checkout/discounts.ts"]
+        "before": [
+          "src/billing/discounts.ts"
+        ],
+        "after": [
+          "src/checkout/discounts.ts"
+        ]
       },
       "success_checks": [
-        ["npm", "run", "test:discount-oracle"]
+        [
+          "npm",
+          "run",
+          "test:discount-oracle"
+        ]
       ],
       "regression_checks": [
-        ["npm", "run", "test:checkout"]
-      ]
+        [
+          "npm",
+          "run",
+          "test:checkout"
+        ]
+      ],
+      "expected_failure": {
+        "regex": "^AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL$",
+        "exit_code": 1
+      }
     }
   ]
 }

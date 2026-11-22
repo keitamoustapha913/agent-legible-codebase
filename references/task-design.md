@@ -15,6 +15,7 @@ An architecture benchmark is only useful when it evaluates **task success**, not
         "after": ["src/checkout/discounts.ts"]
       },
       "success_checks": [["npm", "run", "test:discount-oracle"]],
+      "expected_failure": {"regex": "^AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL$", "exit_code": 1},
       "regression_checks": [["npm", "run", "test:unit"]],
       "setup_commands": [["npm", "ci", "--offline"]]
     }
@@ -49,4 +50,10 @@ Regression checks should cover existing contracts and no unexpected behavior cha
 
 ## Result interpretation
 
-A source-level improvement should reduce code-reading and navigation **without lowering test success**. Improvements in `source_tokens_read` reflect only the parser's visible-shell-output proxy; real provider `total_input_tokens` may tell a different story due to cached context or other prompts. Consider both and investigate when they disagree.
+A source-level improvement should reduce code-reading and navigation **without lowering test success**. Compare attributable source bytes and provider input independently. Tool output coverage, instructions and caching can affect the two measurements differently. Investigate disagreements before changing the design.
+
+## v4 oracle contracts and discovery
+
+For an edit task, give each success check a behavior-specific `expected_failure` contract. For example, an offline verifier can exit 1 and print a stable `AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL` line only when the known task behavior is absent. Supply `{"regex": "^AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL$", "exit_code": 1}`. Both frozen revisions must show this outcome for each success check. Use different host regression checks to prove ordinary existing behavior stays green. Keep expected answers and independent tests outside the agent worktree. Use a checksum-bound sidecar if changing the manifest would break its freeze.
+
+For discovery, use [the discovery example](../examples/tasks.discovery.example.json). Ask a natural domain question and keep exact paths, symbols and dependency paths under each revision's private `expected` block in a file outside the tested repo. For multiple owner files, make `symbols` a mapping from each owner path to its declared names. A single owner can use a symbol list. The evaluator validates both frozen answers before starting and grades owner paths, symbol declarations and expected dependency paths offline. The rationale has a separate human-review field. Python declarations are checked with the AST. Other supported languages use conservative declaration patterns. Design tasks around declarations those checks can verify. See [the environment reference](benchmark-environment.md) for tool and sandbox restrictions.

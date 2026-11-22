@@ -1,0 +1,13 @@
+{
+  "manifest_sha256": "5a2f33e0027d9818ca7d763bd4f35b0be45d1fd8ca33c7164f021a0b7cd9afe8",
+  "tasks": {
+    "invoice-date-fallback": {
+      "regex": "(?ms)\\A(?=.*^FAILED [^\\n]*::test_invoice_dates_use_first_valid_candidate\\b).*?^>\\s+assert (?:\"(?:2026-01-14 \\| PRIMARY-DATE \\||2026-02-02 \\| ISSUE-DATE \\||2026-02-14 \\| LEGACY-DATE \\||NO-VALID-DATE|OUTSIDE-PERIOD|1 undated or invalid-date invoices excluded)\" (?:not )?in notes|counts == \\[\"1\", \"2\"\\])$",
+      "exit_code": 1
+    },
+    "invoice-blank-currency": {
+      "regex": "(?ms)\\A(?=.*^FAILED [^\\n]*::test_invoice_currency_ignores_whitespace_only_fields\\b).*?^>\\s+assert (?:\"(?:130\\.00 GBP|22\\.00 EUR)\" in labels|any\\(.*?notes\\.splitlines\\(\\)\\))$",
+      "exit_code": 1
+    }
+  }
+}

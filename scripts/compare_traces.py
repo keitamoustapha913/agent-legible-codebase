@@ -25,6 +25,11 @@ class TraceError(ValueError):
 NUMERIC_FIELDS = (
     ("source_tokens_to_owner", "Recorded source-context units until owner"),
     ("source_tokens_read", "Recorded source-context units through task"),
+    ("source_output_bytes", "V4 attributable source bytes"),
+    ("source_output_proxy_units", "V4 attributable source regex units"),
+    ("cached_input_tokens", "Cached model input tokens"),
+    ("uncached_input_tokens", "Uncached model input tokens"),
+    ("output_tokens", "Model output tokens"),
     ("total_input_tokens", "Total model input tokens (if logged)"),
     ("owner_steps", "Steps to correct owner"),
     ("search_steps", "Search steps"),
@@ -59,12 +64,13 @@ def read_trace(path: str) -> dict[tuple[str, str], dict[str, Any]]:
         for field in ("correct", "verified"):
             if not isinstance(run.get(field), bool):
                 raise TraceError(f"{path}: {task}/{trial}: {field} must be boolean")
+        run = {**run, "schema_version": content.get("schema_version", run.get("schema_version", 3))}
         for field, _ in NUMERIC_FIELDS:
             if field in ("files_opened", "changed_files"):
                 values = run.get(field)
                 if values is not None and (not isinstance(values, list) or any(not isinstance(v, str) for v in values)):
                     raise TraceError(f"{path}: {task}/{trial}: {field} must be an array of strings")
-            elif field in run and (type(run[field]) is not int or run[field] < 0):
+            elif run.get(field) is not None and (type(run[field]) is not int or run[field] < 0):
                 raise TraceError(f"{path}: {task}/{trial}: {field} must be a nonnegative integer")
         if (run.get("source_tokens_to_owner") is not None and run.get("source_tokens_read") is not None
                 and run["source_tokens_to_owner"] > run["source_tokens_read"]):
@@ -77,6 +83,12 @@ def read_trace(path: str) -> dict[tuple[str, str], dict[str, Any]]:
 
 def metric(run: dict[str, Any], field: str) -> int | None:
     value = run.get(field)
+    if field.startswith("source_output") and (
+        run.get("schema_version") != 4 or run.get("source_attribution_coverage") != "complete"
+    ):
+        return None
+    if field.startswith("source_tokens") and run.get("schema_version") == 4:
+        return None
     if field in ("files_opened", "changed_files"):
         return len(set(value)) if value is not None else None
     return value
@@ -112,14 +124,19 @@ def main(args: list[str]) -> int:
     for task, trial in sorted(old):
         by_task[task].append((trial, old[(task, trial)], new[(task, trial)]))
 
+    if any(r["schema_version"] != 4 for r in (*old.values(), *new.values())):
+        print("Historical source-context units use their original definitions and cannot establish v4 source coverage.")
+    else:
+        print("For experiment validity and environment gates, use report_codex.py with results.json.")
+
     comparable_count = 0
     regressions = 0
     for task, trials in sorted(by_task.items()):
         successful: list[tuple[dict[str, Any], dict[str, Any]]] = []
         print(f"\n{task} ({len(trials)} paired trial(s))")
         for trial_id, first, last in trials:
-            before_ok = first["correct"] and first["verified"]
-            after_ok = last["correct"] and last["verified"]
+            before_ok = first["correct"] and first["verified"] and first.get("environment", "ready") == "ready"
+            after_ok = last["correct"] and last["verified"] and last.get("environment", "ready") == "ready"
             status = "PASS" if before_ok and after_ok else "NOT COMPARABLE"
             print(f"  Trial {trial_id}: before={'PASS' if before_ok else 'FAIL'}, after={'PASS' if after_ok else 'FAIL'} — {status}")
             if before_ok and not after_ok:

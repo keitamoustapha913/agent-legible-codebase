@@ -1,0 +1,21 @@
+{
+  "tasks": [
+    {
+      "id": "discount-policy-discovery",
+      "mode": "discovery",
+      "question": "Where is the authoritative cap on a promotion during checkout? Identify the dependency that supplies the order subtotal.",
+      "expected": {
+        "before": {
+          "owner_paths": ["src/billing/discounts.ts"],
+          "symbols": ["limitDiscountToSubtotal"],
+          "dependency_paths": ["src/billing/totals.ts"]
+        },
+        "after": {
+          "owner_paths": ["src/checkout/discounts.ts"],
+          "symbols": ["limitDiscountToSubtotal"],
+          "dependency_paths": ["src/checkout/subtotal.ts"]
+        }
+      }
+    }
+  ]
+}

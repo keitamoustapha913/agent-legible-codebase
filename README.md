@@ -1,113 +1,80 @@
-# Agent-Legible Codebase v3 — for Codex
+# Agent-Legible Codebase v4
 
-A source-first architecture and empirical testing skill: deep, maintainable modules with obvious ownership, clear names, explicit runtime wiring, local tests and fewer irrelevant code-reading steps for AI coding agents.
+[Open the v4 delivery handoff](V4-DELIVERY.md) for the changed files, test results, pilot analysis, limitations, and next benchmark.
 
-This is an **independent synthesis** inspired by the principles of Matt Pocock's [codebase-design](https://github.com/mattpocock/skills) and [improve-codebase-architecture](https://github.com/mattpocock/skills) skills, plus an original Codex-oriented navigation benchmark. It is not affiliated with or endorsed by Matt Pocock or OpenAI. It does not copy those skills verbatim.
+A Codex skill for making source easier to navigate and change. It emphasizes deep modules, clear ownership, explicit wiring, local tests and evidence from independently verified tasks.
 
-## What changed since v2
+The design guidance is an independent synthesis inspired by Matt Pocock's [codebase-design](https://github.com/mattpocock/skills) and [improve-codebase-architecture](https://github.com/mattpocock/skills) skills.
 
-- **Trace collection from real Codex output:** `scripts/codex_trace.py` parses `codex exec --json` JSONL. It distinguishes provider-reported model token counts from rough source-output estimates and refuses incomplete data.
-- **Isolated paired experiments:** `scripts/benchmark_codex.py` launches independent Codex sessions against pinned Git commits using disposable Git worktrees, deterministic task manifests, repeated trials, randomized ordering, and baseline-red/regression-green preflights.
-- **Correctness-gated failure analysis:** `scripts/report_codex.py` reports pass rates, per-task outcomes, navigational churn and hypothesis-level architecture findings. `scripts/compare_traces.py` from v2 remains compatible.
-- **Preserved v2 architecture discipline:** deep modules, cohesive ownership, progressive code disclosure, explicit dependency wiring, localized tests, architectural guardrails, and no pointless file splitting.
-- **Confounder and privacy controls:** prompts never receive expected owner paths; outputs are outside the repo; raw logs are deleted unless opted into; no unsafe `--yolo` mode. Unlike v2, there is a functional recorder and experiment runner.
+| Mode | Use it to |
+|---|---|
+| Audit | Find concrete navigation problems and prioritize refactor candidates. |
+| Design | Plan a clearer owner, interface and test seam. |
+| Refactor | Make and verify small source-architecture changes. |
+| Trace | Analyze saved Codex JSONL offline. |
+| Benchmark edit | Compare independently verified task edits on two Git revisions. |
+| Benchmark discovery | Compare how agents locate owners, symbols and dependencies through read-only navigation. |
 
-## Install into Codex
+## Install
 
-Unzip the downloaded package; it contains one directory, `agent-legible-codebase/`. Copy **that directory** to:
+Copy this directory to `<your-repo>/.agents/skills/agent-legible-codebase/` for one project, or to `~/.agents/skills/agent-legible-codebase/` for user-level access. Start a fresh Codex session and ask it to use `$agent-legible-codebase`. For example:
 
-- Project-level: `<your-repo>/.agents/skills/agent-legible-codebase/`
-- User-level: `~/.agents/skills/agent-legible-codebase/`
+> Audit the checkout domain for unclear ownership, shallow modules and hard-to-find tests. Prioritize opportunities with concrete source paths.
 
-Codex skill folders contain a `SKILL.md` with `name` and `description` frontmatter; the remaining references/scripts load only as needed. See the [OpenAI skill layout](https://developers.openai.com/plugins/build/skills), and the [Codex CLI options](https://learn.chatgpt.com/docs/cli/reference).
+## Plan a benchmark
 
-Start a fresh Codex session and prompt:
+Use Python 3.10+ and Git. The scripts use the standard library. A live benchmark also needs an authenticated Codex CLI, a suitable model and explicit usage approval. Discovery requires CLI support for read-only permission profiles and the scoped tool settings described in [the environment reference](references/benchmark-environment.md).
 
-> `$agent-legible-codebase Audit my current feature architecture for expensive navigation, unclear ownership, shallow modules and hard-to-find tests. Prioritize code-level improvements, not new docs.`
-
-Or, when you explicitly want code changed:
-
-> `$agent-legible-codebase Refactor the checkout domain so agent discovery and behavior edits are localized. Preserve public behavior, run focused/regression tests, and explain the before/after ownership.`
-
-## Run a Codex benchmark on real revisions
-
-Requirements: **Python 3.10+, Git, authenticated Codex CLI**. Codex CLI is **not** bundled in this ZIP. The code ships without any third-party Python dependencies.
-
-1. Freeze task prompts and trusted command-list tests in your task manifest. Start with `examples/tasks.example.json`, replacing placeholder paths/test commands. Success checks must fail on untouched commits (a meaningful unsolved behavior) and regression checks pass on them.
-2. Commit the before and after source snapshots as immutable refs. Each snapshot should have equivalent external behavior before the benchmark task is solved.
-3. Run a dry plan from the installed skill directory (or replace the script path with your extracted local directory):
+1. Freeze both Git commits and the task manifest. Start with the [edit example](examples/tasks.example.json) or [discovery example](examples/tasks.discovery.example.json). Keep the manifest and independent verifier files outside the tested repo. For edit tasks, supply a behavior-specific failure contract for each success check. For discovery, put revision-specific paths and symbols in the private `expected` block.
+2. Print the plan and review the host commands. The dry-run creates no worktrees and starts no Codex, setup or verifier processes.
 
 ```sh
-python .agents/skills/agent-legible-codebase/scripts/benchmark_codex.py \
-  --repo "$PWD" \
-  --manifest /absolute/path/to/tasks.json \
-  --before BASELINE_COMMIT --after REFACTOR_COMMIT \
-  --out /tmp/agent-legible-v3-run1 \
-  --trials 3 --model YOUR_SUPPORTED_CODEX_MODEL --dry-run
+python3 scripts/benchmark_codex.py --repo /path/to/project \
+  --manifest /path/to/tasks.json --before BASELINE_COMMIT --after REFACTOR_COMMIT \
+  --out /tmp/agent-legible-v4 --trials 3 --model YOUR_SUPPORTED_CODEX_MODEL \
+  --dry-run --show-commands
 ```
 
-4. If the manifest is trusted, the task oracle is valid, and you accept model usage, rerun the command **without `--dry-run`**. By default the script runs preflight success/regression checks first, then fresh Codex sessions with a workspace-write sandbox in disposable Git worktrees.
-5. `report.md` is generated automatically. To regenerate it from recorded results:
+3. To plan discovery, pass `--mode discovery` with a discovery manifest and fresh output path. For either mode, replace the two dry-run flags with `--approve-manifest` only after approval for the planned usage and review of the host commands. `--trials 1` is an instrumentation pilot. `--sandbox-smoke` in edit mode authorizes one extra Codex session per task and revision.
+4. Read `report.md`. The runner also writes `results.json`, `before.json` and `after.json`. Use `scripts/report_codex.py RESULTS_JSON --out REPORT_MD` to render it again. See [trial design and interpretation](references/codex-benchmark.md) and the [Sales pilot replay and next run](references/sales-pilot-reanalysis.md).
+
+## Migrate v3 traces and results
+
+v3 measured the aggregate output of some shell commands as a proxy. v4 requires a source path and attributable content. It counts visible source bytes and optional regex units. A mixed command leaves the full source total unknown while preserving any separately observed reads. Provider input, cached input, derived uncached input and output are independent metrics. The v4 schema leaves the old source-token fields null.
+
+A single saved trace can be replayed without a Codex session:
 
 ```sh
-python .agents/skills/agent-legible-codebase/scripts/report_codex.py \
-  /tmp/agent-legible-v3-run1/results.json \
-  --out /tmp/agent-legible-v3-run1/report.md
-
-python .agents/skills/agent-legible-codebase/scripts/compare_traces.py \
-  /tmp/agent-legible-v3-run1/before.json /tmp/agent-legible-v3-run1/after.json
-```
-
-With six tasks, three trials each and two versions, expect **36 Codex executions** plus tests. You can start with two tasks and one trial to validate instrumentation, but one trial is not robust evidence of an architecture win.
-
-## Analyze already captured Codex JSONL (without running Codex)
-
-```sh
-python .agents/skills/agent-legible-codebase/scripts/codex_trace.py \
-  /path/to/codex-exec.jsonl \
-  --owner src/checkout/discounts.ts \
+python3 scripts/codex_trace.py /path/to/codex-exec.jsonl \
+  --repo-root /original/worktree --owner src/checkout/discounts.ts \
   --output /tmp/codex-trace-summary.json
 ```
 
-For comparable experiments, expected owner paths are offline labels, not inserted into the agent prompt.
-
-## Reading the numbers correctly
-
-`total_input_tokens` is the **Codex provider-reported** count if `turn.completed` includes usage; source/navigation metrics are a **regex proxy over observed shell command output**, not actual source billing tokens or complete model context. Incomplete/empty Codex command output or unsupported tool calls make those source metrics unavailable, not zero. `owner_steps` refers to the first observed mention of a known correct owner, not proof of cognitive recognition. Tests are only as strong as your independent success and regression oracles.
-
-The collector reads **non-interactive `codex exec --json` traces only**; it does **not** automatically intercept interactive Codex TUI sessions, personal Codex history, browser traces, or hidden reasoning. It does not run Codex or inspect a repository until you explicitly invoke the benchmark. Running Codex may contact OpenAI services and consume your plan or API usage. Worktree files and raw JSONL are deleted by default; `--keep-worktrees` / `--keep-raw` retain potentially sensitive content. Trusted manifest verifier commands run on the host, outside Codex sandbox, so review them first.
-
-## Run the included tests
+Add `--unknown-cwd` if the working directories of relative commands are uncertain. To reclassify an entire v3 result set, use the saved JSONL files named `TASK-TRIAL-VARIANT.jsonl`:
 
 ```sh
-python -m unittest discover -s .agents/skills/agent-legible-codebase/tests -v
+python3 scripts/report_codex.py /path/to/v3/results.json \
+  --reanalyze-dir /path/to/raw-traces --worktree-root /original/worktree-parent \
+  --legacy-manifest /path/to/frozen/tasks.json \
+  --reanalysis-json /tmp/replayed-results.json --out /tmp/replayed-report.md
 ```
 
-The tests exercise synthetic JSONL parsing, correctness-regression reporting, and a complete fake-Codex run against a temporary Git repo. **They do not constitute a live Codex benchmark on your codebase.**
+`--legacy-manifest` supplies optional offline owner labels. Omit `--worktree-root` if the worktrees were originally siblings of the traces. With historical JSON only, run the report without replay flags. The report labels historical source coverage unknown. See [the measurement model](references/measurement-model.md) for all coverage states.
 
-## Package structure
+Raw JSONL is private and opt-in with `--keep-raw`. Use `--keep-worktrees` only for manual inspection. Verifier results retain output hashes and diagnostic labels. Edit checks are trusted host processes. Codex edit sessions keep the workspace-write sandbox, and discovery uses a checked read-only profile.
 
-```text
-agent-legible-codebase/
-├── SKILL.md
-├── README.md
-├── scripts/
-│   ├── benchmark_codex.py
-│   ├── codex_trace.py
-│   ├── report_codex.py
-│   └── compare_traces.py
-├── examples/
-│   └── tasks.example.json
-├── references/
-│   ├── codex-benchmark.md
-│   ├── task-design.md
-│   ├── failure-taxonomy.md
-│   ├── design-principles.md
-│   ├── context-locality.md
-│   ├── architecture-guardrails.md
-│   └── benchmark-protocol.md
-└── tests/
-    ├── test_codex_trace.py
-    ├── test_benchmark_codex.py
-    └── test_compare_traces.py
+## Verify the skill offline
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
+
+Tests use synthetic JSONL, temporary Git repositories, independent test commands and fake Codex executables. They use no model sessions.
+
+## Package map
+
+- `SKILL.md` defines the workflows and source-design rules. Architecture references cover depth, ownership, test seams and enforceable guardrails.
+- `scripts/benchmark_codex.py` plans trials and coordinates approvals, preflight, execution and cleanup. `environment_probe.py` owns subprocess limits, diagnostics and fingerprints.
+- `scripts/codex_trace.py` normalizes JSONL and independent usage and source metrics. `trace_attribution.py` classifies supported shell commands.
+- `scripts/discovery_navigation.py` serves scoped listing, search and read operations. `discovery_oracle.py` validates and grades the answers offline.
+- `scripts/report_codex.py` reports validity and per-task measurements and can replay old JSONL. `compare_traces.py` supports saved before/after files.

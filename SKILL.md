@@ -3,7 +3,7 @@ name: agent-legible-codebase
 description: Improve source-level codebase discoverability, change locality, deep-module interfaces, and AI coding-agent context efficiency. Audit, redesign, safely refactor, or empirically benchmark real code changes. Includes Codex CLI JSONL trace collection, independent Git-worktree task trials, correctness checks, and evidence-backed navigation failure analysis. Use when agents search too much, must read unrelated code, repeatedly miss feature owners, or need large context for routine changes.
 ---
 
-# Agent-Legible Codebase — v3 (Codex-ready)
+# Agent-Legible Codebase — v4 (Codex-ready)
 
 **Goal:** Maximize **correct, maintainable, verified code changes per unit of agent context**. Organize the **source code itself** so an unfamiliar Codex agent can discover the owner, inspect a small interface, trace behavior, make a local change, and find tests without reading unrelated parts of the repository. Do **not** optimize for shortest files, fewer lines, or a bigger `AGENTS.md`.
 
@@ -14,8 +14,9 @@ description: Improve source-level codebase discoverability, change locality, dee
 | Find what's making the repo hard to navigate | **audit** | Real path-specific friction and ranked refactor candidates; no source edits |
 | Plan a clearer module design | **design** | Explicit ownership, interface, wiring, test seam, risks; no edits unless requested |
 | Improve actual source architecture | **refactor** | Small reversible source changes, verified behavior, new guardrails where useful |
-| Gather concrete Codex navigation failures | **trace** | Parsed JSONL with source-output proxy, actual Codex model usage when logged, evidence |
-| Test before vs after repository design | **benchmark** | Independent paired task runs, verified outcomes, cost medians, architectural hypotheses |
+| Gather concrete Codex navigation failures | **trace** | Parsed JSONL with attributable source bytes, independent provider usage and event evidence |
+| Compare repository design on real edits | **benchmark** | Counterbalanced paired edit trials with independent checks, usage and evidence |
+| Compare how quickly agents locate and explain code | **benchmark (discovery)** | Read-only paired trials with offline owner, symbol and dependency scoring |
 
 Use **audit** if requested to review; **refactor** if the user explicitly requests source changes. **Trace/benchmark** do not automatically mean refactor. Running large or costly autonomous benchmarks requires explicit user authorization. Do not claim measured savings without real paired runs.
 
@@ -47,43 +48,22 @@ In **audit**, stop after 2–5 candidate opportunities with concrete affected pa
 
 ## Workflow B — empirical Codex measurement
 
-**Benchmark only when users approve the cost.** The harness can run many real Codex sessions, each consuming model usage. Do not launch it just to demonstrate this skill. Before a before/after experiment, read `references/codex-benchmark.md` and `references/task-design.md`.
+**Benchmark only when users approve the cost.** Read `references/codex-benchmark.md`, `references/task-design.md` and `references/benchmark-environment.md`.
 
-1. **Freeze 2–10 authentic task prompts before refactoring**, phrased like user requests without file hints. Supply independent behavior oracles that are *red* on both untouched snapshots and regression checks that are *green* on both. Use comparable dependency installations and equivalent observable behavior.
-2. **Pin two immutable Git revisions** (`--before` and `--after`), the same Codex CLI/model/config, tools, timeouts, and evaluation commands. Use at least three independent task trials per version where feasible; keep the same trial IDs across versions.
-3. **Dry-run the manifest** using `scripts/benchmark_codex.py --dry-run`. Keep the output directory outside the repo. Review every manifest command: benchmark verifiers run on the host, and Codex operates on disposable Git worktrees.
-4. **Run paired Codex tasks** with `codex exec --json --ephemeral --sandbox workspace-write`, one fresh thread per run. Capture completed shell commands, searches, visible file paths, edits, and `turn.completed.usage` where available. Never reuse a successful agent's learned context.
-5. **Generate the report** (the runner creates `report.md` automatically; rerun `scripts/report_codex.py` when needed); optionally run the v2-compatible `scripts/compare_traces.py` on `before.json` and `after.json`. Inspect evidence for false leads, name collisions, repeated searches, dependency chasing, excessive edits and tool telemetry gaps.
-6. **Accept a refactor only if correctness holds.** Compare all pass/fail trials first; compare token costs only on matched both-pass trials, without hiding failures. Reduce architectural complexity only when the evidence and maintainability review support it. Test any follow-up changes on untouched holdout tasks.
+1. Freeze authentic task prompts and pin immutable before and after revisions. Edit tasks need independent success checks that fail for an expected behavioral reason and regression checks that pass at both revisions. Discovery tasks need natural-language navigation questions and offline path, symbol and dependency answers.
+2. Keep the CLI, model, sandbox, tools and timeouts fixed across both variants. Dry-run outside the repository with `--dry-run --show-commands`. Review all trusted host commands and approve usage before using `--approve-manifest`. An optional `--sandbox-smoke` consumes additional Codex sessions and is separate from host checks.
+3. Keep trials fresh and counterbalanced. A single pair per task checks instrumentation. At least three pairs per task support a preliminary trend. Add holdouts when the design choices were informed by the measured tasks.
+4. Check the generated report for independent correctness, environment, oracle and telemetry conditions before comparing usage. Inspect per-task results and validate linked hypotheses in the source before changing its architecture.
 
-Typical commands (from the installed skill folder):
+To analyze one saved trace offline:
 
 ```sh
-python scripts/benchmark_codex.py --repo /path/to/project --manifest /path/to/tasks.json \
-  --before baseline-revision --after refactored-revision \
-  --out /tmp/codex-codebase-benchmark --trials 3 --model YOUR_SUPPORTED_CODEX_MODEL --dry-run
-
-# Remove --dry-run only after reviewing tasks, trusted local verifier commands,
-# test preflight, model costs, and disposable worktree behavior.
-python scripts/report_codex.py /tmp/codex-codebase-benchmark/results.json \
-  --out /tmp/codex-codebase-benchmark/report.md
+python3 scripts/codex_trace.py /path/to/codex-exec.jsonl \
+  --repo-root /original/worktree --owner src/checkout/discounts.ts \
+  --output /tmp/discount-trace.json
 ```
 
-For a **single existing Codex JSONL trace** (no new model run), use:
-
-```sh
-python scripts/codex_trace.py /path/to/codex-exec.jsonl \
-  --owner src/checkout/discounts.ts --output /tmp/discount-trace.json
-```
-
-### What counts as a real measurement?
-
-- **Codex `turn.completed.usage.input_tokens`:** provider-reported input tokens, if the event contains them; includes prompt and other context, **not just source code**. Cache tokens are reported separately.
-- **Navigation output estimate:** an explicit regex word/punctuation proxy over visible `rg`/`grep`/`cat`/`sed`/similar shell command output. It is **not** an exact model tokenizer, complete source exposure, or billing cost. Missing/empty successful navigation output or uninstrumented MCP calls suppress these numbers rather than silently counting zero.
-- **Owner first seen:** the expected owning path first appears in a command or result. This is an observable **path mention**, not proof that the agent knew it was the right owner. Owner paths are used only by the offline evaluator, never leaked into task prompts.
-- **Correct + verified:** independently defined success checks and baseline regression checks pass after Codex; not inferred from Codex's final summary. If checks don't prove the requested behavior, label the result provisional.
-
-See `references/failure-taxonomy.md` when mapping repeated trace patterns to candidate source refactors. **Agent errors, tool bugs, poor task wording, and unavailable dependencies can mimic architecture failures; investigate before changing the source.**
+`references/measurement-model.md` defines source bytes and regex units, provider token usage, first owner mention and their coverage limits. A reading with no visible output or unclear source attribution is unknown. A path mention is only an observable reference. Model input covers all provider context. `references/failure-taxonomy.md` maps observed navigation patterns to hypotheses after environmental and instrumentation problems are accounted for.
 
 ## Source-first acceptance check
 

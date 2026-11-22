@@ -1,5 +1,7 @@
 # Benchmark: discoverability, context cost and maintainability
 
+This page describes the legacy manual trace format. For v4 automation and metric definitions, see [the paired benchmark](codex-benchmark.md) and [the measurement model](measurement-model.md).
+
 **Never replace correctness with a lower context metric.** Evaluate common, real changes under comparable task prompts, fresh agent contexts, and equivalent verification. This protocol is separate from the skill's code-design rules: source structure should make retrieval economical, not be distorted to win an artificial benchmark.
 
 ## Define workloads before refactoring
