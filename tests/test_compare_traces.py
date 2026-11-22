@@ -69,6 +69,17 @@ class TraceComparatorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("nonnegative", result.stderr)
 
+    def test_v4_source_bytes_distinguish_zero_from_partial_coverage(self):
+        before = self.run_record(schema_version=4, source_output_bytes=0, source_attribution_coverage="complete")
+        after = dict(before, source_output_bytes=8)
+        result = self.compare([before], [after])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("V4 attributable source bytes: 0 → 8", result.stdout)
+        self.assertIn("Recorded source-context units through task: unrecorded", result.stdout)
+        result = self.compare([before], [dict(after, source_attribution_coverage="partial")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("V4 attributable source bytes: unrecorded", result.stdout)
+
     def test_unrecorded_metric_is_not_zero(self):
         first = self.run_record()
         second = self.run_record()

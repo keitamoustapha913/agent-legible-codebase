@@ -21,7 +21,8 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from codex_trace import navigation_invalid_reason, summarize_jsonl
+from codex_trace import summarize_jsonl
+from discovery_eligibility import assess_discovery_run
 from trace_attribution import path_category, shell_body
 from discovery_oracle import PROMPT_FORMAT, owner_symbols, score_answer, score_discovery_facts, valid_expected, validate_task
 from discovery_readiness import private_opener, probe_navigation
@@ -563,17 +564,13 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
         if status == "interrupted":
             return record
         if discovery:
-            invalid_reason = navigation_invalid_reason(record)
-            if not invalid_reason and summary["confirmed_source_reads"] and not agent["navigation_server"]["succeeded"]:
-                invalid_reason = "mcp_server_telemetry_missing"
             ignored = run_git(cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
-            if edits or ignored or summary.get("file_change_events") or summary["shell_commands"] or summary["tool_calls_not_instrumented"]:
-                record["environment"] = "confounded"
-                record["discovery_violation"] = "Unexpected tool or checkout change during discovery"
-            elif invalid_reason:
-                record["environment"] = "blocked"
-                record["discovery_invalid_reason"] = invalid_reason
-            elif complete:
+            eligibility = assess_discovery_run(record, ignored_files_present=bool(ignored))
+            record["environment"] = eligibility.environment
+            if eligibility.reason:
+                key = "discovery_violation" if eligibility.environment == "confounded" else "discovery_invalid_reason"
+                record[key] = eligibility.reason
+            elif eligibility.eligible:
                 score = score_answer(answer, expected, cwd)
                 record["discovery_score"] = score
                 record["discovery_semantic_score"] = score_discovery_facts(answer, expected, cwd)

@@ -175,23 +175,6 @@ def navigation_evidence(item: dict, item_id: str, step: int, line: int, root: Pa
     }
 
 
-def navigation_invalid_reason(run: dict) -> str | None:
-    """Use only evidence of usable navigation, including on archived summaries."""
-    events = [e for e in run.get("events", []) if e.get("event_type") == "mcp_tool_call"]
-    if run.get("unfinished_commands") or any(
-        e.get("output_status") == "missing" and e.get("execution_status") != "failed"
-        for e in events
-    ):
-        return "navigation_results_missing"
-    if events and not any(e.get("output_status") == "available" and
-                          e.get("execution_status") == "completed" and not e.get("navigation_failure")
-                          for e in events):
-        return "no_usable_navigation_results"
-    if run.get("agent_completion") == "completed" and not run.get("confirmed_source_reads"):
-        return "no_confirmed_source_read"
-    return None
-
-
 def summarize_jsonl(path: Path, owners: list[str] | None = None, *,
                     repo_root: Path | None = None, relative_cwd_known: bool = True,
                     capture_answer: bool = False, discovery_tools: bool = False) -> dict[str, Any]:

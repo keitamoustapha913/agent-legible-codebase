@@ -17,6 +17,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from trace_metrics import numeric_metric
+
 
 class TraceError(ValueError):
     """The supplied trace set cannot be compared reliably."""
@@ -82,16 +84,10 @@ def read_trace(path: str) -> dict[tuple[str, str], dict[str, Any]]:
 
 
 def metric(run: dict[str, Any], field: str) -> int | None:
-    value = run.get(field)
-    if field.startswith("source_output") and (
-        run.get("schema_version") != 4 or run.get("source_attribution_coverage") != "complete"
-    ):
-        return None
-    if field.startswith("source_tokens") and run.get("schema_version") == 4:
-        return None
     if field in ("files_opened", "changed_files"):
+        value = run.get(field)
         return len(set(value)) if value is not None else None
-    return value
+    return numeric_metric(run, field, schema_version=run.get("schema_version", 3))
 
 
 def show_delta(before: int | float | None, after: int | float | None) -> str:

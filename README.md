@@ -1,26 +1,22 @@
-# Agent-Legible Codebase v4
+# Agent-Legible Codebase
 
-A Codex skill for making source easier to navigate and change. It emphasizes deep modules, clear ownership, explicit wiring, local tests and evidence from independently verified tasks.
+A Codex skill for auditing source architecture and making selected improvements. It emphasizes deep modules, clear ownership, explicit interfaces and wiring, and local tests.
 
 The design guidance is an independent synthesis inspired by Matt Pocock's [codebase-design](https://github.com/mattpocock/skills) and [improve-codebase-architecture](https://github.com/mattpocock/skills) skills.
 
-| Mode | Use it to |
-|---|---|
-| Audit | Find concrete navigation problems and prioritize refactor candidates. |
-| Design | Plan a clearer owner, interface and test seam. |
-| Refactor | Make and verify small source-architecture changes. |
-| Trace | Analyze saved Codex JSONL offline. |
-| Benchmark edit | Compare the same Codex editing tasks on two Git revisions. Host checks are optional. |
-| Benchmark discovery | Compare how agents locate owners, symbols and dependencies through read-only navigation. |
-| Benchmark isolated verifier | Keep agent edits sandboxed and run independent tests inside offline QEMU guests. |
-
 ## Install
 
-Copy this directory to `<your-repo>/.agents/skills/agent-legible-codebase/` for one project, or to `~/.agents/skills/agent-legible-codebase/` for user-level access. Start a fresh Codex session and ask it to use `$agent-legible-codebase`. For example:
+Copy this directory to `<your-repo>/.agents/skills/agent-legible-codebase/` for one project, or to `~/.agents/skills/agent-legible-codebase/` for user-level access. Start a fresh Codex session in the repository you want to improve.
 
-> Audit the checkout domain for unclear ownership, shallow modules and hard-to-find tests. Prioritize opportunities with concrete source paths.
+## Use in a Codex conversation
+
+1. Ask **“$agent-legible-codebase Improve my codebase.”** Codex audits the current working tree and returns ranked, path-specific recommendations with evidence, proposed changes, benefits, effort, and risks.
+2. If you want a narrower audit, specify the workflow, for example **“$agent-legible-codebase Audit checkout, from the request handler to its tests.”** You can also ask for more detail about a recommendation before choosing it.
+3. Reply **“Fix item 1,” “Fix the first three,”** or **“Apply all.”** Codex implements the selected recommendations in manageable batches and reports verification results. The audit itself is read-only.
 
 ## Run a benchmark
+
+Request benchmarking or formal measurement explicitly. For an existing Codex JSONL file, ask for [trace analysis](#migrate-v3-traces-and-results). The interactive workflow uses the tools in your current Codex session.
 
 Choose a Git repository, its original and refactored revisions, and a [task manifest](examples/tasks.example.json). An edit task only needs an ID and a prompt. Choose an output directory outside the repository.
 

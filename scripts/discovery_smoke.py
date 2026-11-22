@@ -15,7 +15,8 @@ from pathlib import Path
 from benchmark_codex import (
     call_agent, check_navigation, discovery_boundary, modified_files, resolve_cli_version, run_git, write_json,
 )
-from codex_trace import navigation_invalid_reason, summarize_jsonl
+from codex_trace import summarize_jsonl
+from discovery_eligibility import navigation_invalid_reason
 
 SYMBOL = "navigation_smoke_value"
 SOURCE_FILE = "sample.py"

@@ -36,6 +36,23 @@ class ReportTests(unittest.TestCase):
         self.assertIn("invoice input tokens moved differently from the median paired change in trial 2 (+10).", report)
         self.assertIn("invoice trial 2 (after) scored fail on strict grading and pass on semantic grading.", report)
 
+    def test_archived_discovery_accepts_missing_journal_but_honors_recorded_invalidity(self):
+        runs = [run("invoice", 1, side, 100, confirmed_source_reads=1, regression="not_evaluated")
+                for side in ("before", "after")]
+        doc = {"runs": runs, "metadata": {"workflow": "simple", "mode": "discovery"}}
+        report, _ = render_report(doc)
+        self.assertIn("usable observations 1/1", report)
+
+        runs[1]["agent"] = {"navigation_server": {"succeeded": 0, "failed": 0}}
+        report, _ = render_report(doc)
+        self.assertIn("mcp_server_telemetry_missing", report)
+        self.assertIn("usable observations 0/1", report)
+
+        runs[1]["discovery_invalid_reason"] = "archived_reason"
+        report, _ = render_report(doc)
+        self.assertIn("archived_reason", report)
+        self.assertNotIn("mcp_server_telemetry_missing", report)
+
     def test_host_green_but_sandbox_blocked_invalidates_experiment(self):
         report, eligible = render_report({
             "schema_version": 4, "metadata": {"preflight_status": "ready", "sandbox_smoke_status": "environment_blocked"},

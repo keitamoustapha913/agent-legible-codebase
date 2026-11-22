@@ -12,7 +12,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from codex_trace import navigation_invalid_reason, summarize_jsonl
+from codex_trace import summarize_jsonl
+from discovery_eligibility import assess_discovery_run
+from trace_metrics import numeric_metric
 
 PROVIDER = (
     ("total_input_tokens", "Total input"), ("cached_input_tokens", "Cached input"),
@@ -67,11 +69,13 @@ def pair_runs(runs: list[dict]) -> tuple[list[tuple[str, dict, dict]], int]:
 
 
 def get_metrics(pairs: list[tuple[str, dict, dict]], field: str) -> list[tuple[int, int]]:
-    return [(a[field], b[field]) for _, a, b in pairs
-            if type(a.get(field)) is int and type(b.get(field)) is int
-            and (not field.startswith("source_output") or (
-                a.get("source_attribution_coverage") == b.get("source_attribution_coverage") == "complete"
-            ))]
+    measured = []
+    for _, before, after in pairs:
+        first = numeric_metric(before, field)
+        second = numeric_metric(after, field)
+        if first is not None and second is not None:
+            measured.append((first, second))
+    return measured
 
 
 def paired_table(pairs: list[tuple[str, dict, dict]], tasks: list[str], fields: tuple) -> list[str]:
@@ -322,13 +326,17 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
     tasks = sorted({r["task_id"] for r in runs} | set(meta.get("task_ids", [])))
     outcome, reason = simple_outcome(meta, pairs, tasks, missing, len(runs))
     discovery = meta["mode"] == "discovery"
-    unusable = {id(r): r.get("discovery_invalid_reason") or navigation_invalid_reason(r)
-                for r in runs} if discovery else {}
-    if discovery and (any(unusable.values()) or meta.get("experiment_status") in
-                      {"invalid", "environment_blocked", "environment_confounded"}):
-        outcome, reason = "INVALID", "Discovery readiness or navigation evidence failed. The runs cannot measure architecture."
-    observed = [p for p in pairs if all(r.get("agent_completion") == "completed" and
-                                      r.get("environment") == "ready" and not unusable.get(id(r)) for r in p[1:])]
+    if discovery:
+        assessments = {id(r): assess_discovery_run(r) for r in runs}
+        if any(result.reason for result in assessments.values()) or meta.get("experiment_status") in {
+            "invalid", "environment_blocked", "environment_confounded"
+        }:
+            outcome, reason = "INVALID", "Discovery readiness or navigation evidence failed. The runs cannot measure architecture."
+        observed = [p for p in pairs if all(assessments[id(r)].eligible for r in p[1:])]
+    else:
+        assessments = {}
+        observed = [p for p in pairs if all(r.get("agent_completion") == "completed" and
+                                            r.get("environment") == "ready" for r in p[1:])]
     lines = [
         "# Codex benchmark", "", f"**{outcome}** — {reason}", "",
         f"Model {cell(meta.get('model_requested'))}. Completed pairs with usable observations {len(observed)}/{len(pairs) + missing}.",
@@ -345,12 +353,14 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
     lines.extend(["", row("Task", "Trial", "Revision", "Agent", "Behavior", "Regression", "Provider input", "Environment"),
                   row(*("---" for _ in range(8)))])
     for r in runs:
+        assessment = assessments.get(id(r))
+        invalid = assessment is not None and assessment.reason is not None
         environment = ("pytest execution observed" if r.get("agent_test_execution_observed")
                        else r.get("environment"))
         lines.append(row(r["task_id"], r["trial_id"], r["variant"], r.get("agent_completion"),
-                         "unevaluated" if unusable.get(id(r)) else r.get("behavior"),
+                         "unevaluated" if invalid else r.get("behavior"),
                          r.get("regression"), r.get("total_input_tokens"),
-                         "INVALID" if unusable.get(id(r)) else environment))
+                         "INVALID" if invalid else environment))
     for r in runs:
         failures = {stage: check_status(r, stage) for stage in ("setup", "success", "regression")
                     if any(c.get("exit_code") != 0 for c in r.get(f"{stage}_checks", []))}
@@ -359,8 +369,10 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
                          + ", ".join(f"{stage} {cell(status)}" for stage, status in failures.items()))
         if discovery:
             label = f"{cell(r['task_id'])}/{cell(r['trial_id'])}/{cell(r['variant'])}"
-            if unusable.get(id(r)):
-                lines.append(f"- {label} invalid navigation — {cell(unusable[id(r)])}.")
+            assessment = assessments[id(r)]
+            if assessment.reason:
+                issue = "discovery violation" if assessment.environment == "confounded" else "invalid navigation"
+                lines.append(f"- {label} {issue} — {cell(assessment.reason)}.")
             for event in r.get("events", []):
                 if event.get("event_type") == "mcp_tool_call" and (
                     event.get("navigation_failure") or event.get("output_status") != "available"

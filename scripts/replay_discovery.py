@@ -12,7 +12,8 @@ import tempfile
 from pathlib import Path
 
 from benchmark_codex import new_worktree, parse_manifest, remove_worktree, run_git, write_json
-from codex_trace import navigation_invalid_reason, summarize_jsonl
+from codex_trace import summarize_jsonl
+from discovery_eligibility import assess_discovery_run
 from discovery_oracle import score_discovery_facts
 from report_codex import pair_runs, render_report, write_private
 
@@ -46,8 +47,7 @@ def replay(repo: Path, archive: Path, manifest: Path) -> dict:
             cwd = new_worktree(repo, Path(temp), side, revision)
             try:
                 for run in selected:
-                    if (run.get("environment") != "ready" or run.get("agent_completion") != "completed"
-                            or navigation_invalid_reason(run)):
+                    if not assess_discovery_run(run).eligible:
                         run["discovery_semantic_score"] = {"status": "unscorable", "reason": "unusable_run"}
                         continue
                     trace = archive / f"{run['task_id']}-{run['trial_id']}-{side}.jsonl"
