@@ -1,0 +1,3 @@
+interface:
+  display_name: "Agent-Legible Codebase"
+  short_description: "Make codebases easier for coding agents to navigate"
