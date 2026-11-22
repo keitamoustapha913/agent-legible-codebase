@@ -37,17 +37,4 @@ python3 scripts/report_codex.py /tmp/qworks-sales-pilot.kxRdTx/results/results.j
   --legacy-manifest /tmp/qworks-sales-benchmark.W7QcTc/tasks.json
 ```
 
-The next edit study stays on the frozen revisions and manifest. The example [oracle sidecar](../examples/sales-pilot.oracle.json) binds assertion patterns to the original manifest digest without changing the manifest or verifiers. These patterns were derived from the frozen verifier's assertions and still need validation against actual host preflight output on both revisions.
-
-```sh
-python3 scripts/benchmark_codex.py \
-  --repo /home/theyeq-admin-lap/master-workspace-2/Qworks-erp-native-register-json-recovery \
-  --manifest /tmp/qworks-sales-benchmark.W7QcTc/tasks.json \
-  --oracle-contract examples/sales-pilot.oracle.json \
-  --before d682cc8884773063b361e40354b544c0950a228f \
-  --after a3ece821fa3112858175fd7c8081eec1765eeeb9 \
-  --out /tmp/agent-legible-v4-sales-study \
-  --model gpt-6.2-sol --trials 3 --dry-run --show-commands
-```
-
-Review the plan, manifest and sidecar. A three-pair study on these two tasks schedules 12 sessions. For the first approved run, use `--trials 1 --sandbox-smoke` on a fresh output path to check host and sandbox behavior and instrumentation. That plan authorizes up to four smoke sessions and four task sessions. Replace `--dry-run --show-commands` with `--approve-manifest` only after approval for those sessions. If host preflight or sandbox smoke fails, resolve the reported environment issue before the study. The frozen tasks were used in the pilot. Include independently selected holdouts before drawing broader conclusions.
+Read the [current Sales plans](sales-pilot-readiness.md) for exact simple edit and discovery commands. The simple edit pilot uses the same tasks and revisions, tells Codex to skip pytest, and schedules four model sessions. Host verification is optional and requires explicit opt-in. The checksum-bound [Sales oracle sidecar](../examples/sales-pilot.oracle.json) preserves the intended assertion matchers for trusted verification. Both patterns matched actual host output on both revisions. The frozen tasks were used in the pilot. Include independent holdouts before drawing broader conclusions.

@@ -2,7 +2,9 @@
 
 An architecture benchmark is only useful when it evaluates **task success**, not the appearance of a diff. Freeze prompts and oracles before refactoring. Do not hand the agent the expected owner path, test target, or desired code edit.
 
-## Minimal manifest
+An edit task only needs an ID and a prompt. The default skips application setup and test commands. See the [minimal edit example](../examples/tasks.example.json).
+
+## Manifest with optional verification
 
 ```json
 {
@@ -23,7 +25,7 @@ An architecture benchmark is only useful when it evaluates **task success**, not
 }
 ```
 
-Paths and test commands above are placeholders—customize for the actual repo. The success oracle should fail before Codex edits the code on BOTH architecture snapshots, and pass afterward only if the new behavior exists; the regression checks must pass on both snapshots before the task. The runner enforces preflight by default. If `setup_commands` is not necessary, omit it.
+Paths and test commands above are placeholders—customize for the actual repo. The success oracle should fail before Codex edits the code on BOTH architecture snapshots, and pass afterward only if the new behavior exists; the regression checks must pass on both snapshots before the task. In simple mode, `--allow-host-tests` runs configured checks after the model session. Advanced qualification or isolated verification validates both baselines first. Omit setup when checks need no preparation.
 
 ## Good task mix
 
@@ -54,6 +56,6 @@ A source-level improvement should reduce code-reading and navigation **without l
 
 ## v4 oracle contracts and discovery
 
-For an edit task, give each success check a behavior-specific `expected_failure` contract. For example, an offline verifier can exit 1 and print a stable `AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL` line only when the known task behavior is absent. Supply `{"regex": "^AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL$", "exit_code": 1}`. Both frozen revisions must show this outcome for each success check. Use different host regression checks to prove ordinary existing behavior stays green. Keep expected answers and independent tests outside the agent worktree. Use a checksum-bound sidecar if changing the manifest would break its freeze.
+For advanced edit verification, give each success check a behavior-specific `expected_failure` contract. For example, an offline verifier can exit 1 and print a stable `AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL` line only when the known task behavior is absent. Supply `{"regex": "^AssertionError: DISCOUNT_EXCEEDS_SUBTOTAL$", "exit_code": 1}`. Both frozen revisions must show this outcome for each success check. Use different host regression checks to prove ordinary existing behavior stays green. Keep expected answers and independent tests outside the agent worktree. Use a checksum-bound sidecar if changing the manifest would break its freeze.
 
 For discovery, use [the discovery example](../examples/tasks.discovery.example.json). Ask a natural domain question and keep exact paths, symbols and dependency paths under each revision's private `expected` block in a file outside the tested repo. For multiple owner files, make `symbols` a mapping from each owner path to its declared names. A single owner can use a symbol list. The evaluator validates both frozen answers before starting and grades owner paths, symbol declarations and expected dependency paths offline. The rationale has a separate human-review field. Python declarations are checked with the AST. Other supported languages use conservative declaration patterns. Design tasks around declarations those checks can verify. See [the environment reference](benchmark-environment.md) for tool and sandbox restrictions.

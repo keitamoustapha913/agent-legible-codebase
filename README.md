@@ -1,7 +1,5 @@
 # Agent-Legible Codebase v4
 
-[Open the v4 delivery handoff](V4-DELIVERY.md) for the changed files, test results, pilot analysis, limitations, and next benchmark.
-
 A Codex skill for making source easier to navigate and change. It emphasizes deep modules, clear ownership, explicit wiring, local tests and evidence from independently verified tasks.
 
 The design guidance is an independent synthesis inspired by Matt Pocock's [codebase-design](https://github.com/mattpocock/skills) and [improve-codebase-architecture](https://github.com/mattpocock/skills) skills.
@@ -12,8 +10,9 @@ The design guidance is an independent synthesis inspired by Matt Pocock's [codeb
 | Design | Plan a clearer owner, interface and test seam. |
 | Refactor | Make and verify small source-architecture changes. |
 | Trace | Analyze saved Codex JSONL offline. |
-| Benchmark edit | Compare independently verified task edits on two Git revisions. |
+| Benchmark edit | Compare the same Codex editing tasks on two Git revisions. Host checks are optional. |
 | Benchmark discovery | Compare how agents locate owners, symbols and dependencies through read-only navigation. |
+| Benchmark isolated verifier | Keep agent edits sandboxed and run independent tests inside offline QEMU guests. |
 
 ## Install
 
@@ -21,22 +20,23 @@ Copy this directory to `<your-repo>/.agents/skills/agent-legible-codebase/` for 
 
 > Audit the checkout domain for unclear ownership, shallow modules and hard-to-find tests. Prioritize opportunities with concrete source paths.
 
-## Plan a benchmark
+## Run a benchmark
 
-Use Python 3.10+ and Git. The scripts use the standard library. A live benchmark also needs an authenticated Codex CLI, a suitable model and explicit usage approval. Discovery requires CLI support for read-only permission profiles and the scoped tool settings described in [the environment reference](references/benchmark-environment.md).
-
-1. Freeze both Git commits and the task manifest. Start with the [edit example](examples/tasks.example.json) or [discovery example](examples/tasks.discovery.example.json). Keep the manifest and independent verifier files outside the tested repo. For edit tasks, supply a behavior-specific failure contract for each success check. For discovery, put revision-specific paths and symbols in the private `expected` block.
-2. Print the plan and review the host commands. The dry-run creates no worktrees and starts no Codex, setup or verifier processes.
+Choose a Git repository, its original and refactored revisions, and a [task manifest](examples/tasks.example.json). An edit task only needs an ID and a prompt. Choose an output directory outside the repository.
 
 ```sh
 python3 scripts/benchmark_codex.py --repo /path/to/project \
   --manifest /path/to/tasks.json --before BASELINE_COMMIT --after REFACTOR_COMMIT \
-  --out /tmp/agent-legible-v4 --trials 3 --model YOUR_SUPPORTED_CODEX_MODEL \
-  --dry-run --show-commands
+  --out /tmp/agent-legible-v4 --model YOUR_SUPPORTED_CODEX_MODEL \
+  --trials 1 --dry-run
 ```
 
-3. To plan discovery, pass `--mode discovery` with a discovery manifest and fresh output path. For either mode, replace the two dry-run flags with `--approve-manifest` only after approval for the planned usage and review of the host commands. `--trials 1` is an instrumentation pilot. `--sandbox-smoke` in edit mode authorizes one extra Codex session per task and revision.
-4. Read `report.md`. The runner also writes `results.json`, `before.json` and `after.json`. Use `scripts/report_codex.py RESULTS_JSON --out REPORT_MD` to render it again. See [trial design and interpretation](references/codex-benchmark.md) and the [Sales pilot replay and next run](references/sales-pilot-reanalysis.md).
+After approving the planned model usage, replace `--dry-run` with `--approve-manifest`. Each task runs once per revision per trial in a fresh disposable worktree using `codex exec --json`. Open `report.md` for the outcome, correctness, tokens, searches, file visits and edit scope. Use three or more pairs per task for a preliminary trend.
+
+- **Edit is the default.** Codex can inspect and edit in its normal restricted workspace. The prompt tells it to leave pytest to the controller. Setup and host checks are skipped by default.
+- **Discovery** uses `--mode discovery` and a [discovery manifest](examples/tasks.discovery.example.json). Codex inspects tracked files through read-only tools. The offline oracle scores the answer and no application tests run.
+- **Optional host tests** use `--allow-host-tests` in addition to model approval. First run with `--dry-run --show-commands` and review every listed command and the code it can execute. When enabled, setup and tests run after Codex in the edited worktree with the controller's host permissions, outside the Codex sandbox. Use only with trusted projects and commands. Skipped or insufficient checks leave the architecture verdict inconclusive while still showing measured usage.
+- **Advanced verification** uses [isolated-verifier mode](references/isolated-verifier.md) for an offline VM. The default flow needs no VM, Python sandbox probe or model smoke. [Sales example and readiness](references/sales-pilot-readiness.md)
 
 ## Migrate v3 traces and results
 
@@ -61,7 +61,7 @@ python3 scripts/report_codex.py /path/to/v3/results.json \
 
 `--legacy-manifest` supplies optional offline owner labels. Omit `--worktree-root` if the worktrees were originally siblings of the traces. With historical JSON only, run the report without replay flags. The report labels historical source coverage unknown. See [the measurement model](references/measurement-model.md) for all coverage states.
 
-Raw JSONL is private and opt-in with `--keep-raw`. Use `--keep-worktrees` only for manual inspection. Verifier results retain output hashes and diagnostic labels. Edit checks are trusted host processes. Codex edit sessions keep the workspace-write sandbox, and discovery uses a checked read-only profile.
+Raw JSONL is private and opt-in with `--keep-raw`. Use `--keep-worktrees` only for manual inspection. Verifier results retain output hashes and diagnostic labels. Codex edit sessions keep the workspace-write sandbox. Discovery uses a checked read-only profile.
 
 ## Verify the skill offline
 

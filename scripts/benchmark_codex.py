@@ -2,7 +2,7 @@
 """Run a paired, cold-start Codex CLI benchmark in disposable Git worktrees.
 
 Requires Git and Codex CLI to run real experiments. Python standard library only.
-IMPORTANT: manifest commands are local processes; review them before running.
+Host commands are opt-in. Review them and the code they execute.
 """
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ from typing import Any, Callable
 from codex_trace import summarize_jsonl
 from trace_attribution import path_category, shell_body
 from discovery_oracle import PROMPT_FORMAT, score_answer, valid_expected, validate_task
+from sandbox_runtime import NETWORK_DISABLED, check_runtime
+from isolated_verifier import IsolatedVerifier, REGRESSION_ASSERTION, protected_digests
 from report_codex import render_report, write_private
 from environment_probe import (
     bounded_output, configuration_fingerprint, diagnostic_labels, execute_command, resolve_cli_version, run_process,
@@ -53,7 +55,8 @@ def checked_argv(value: Any, field: str) -> list[list[str]]:
     return result
 
 
-def parse_manifest(path: Path, *, raw: bytes | None = None, mode: str = "edit") -> list[dict[str, Any]]:
+def parse_manifest(path: Path, *, raw: bytes | None = None, mode: str = "edit",
+                   require_checks: bool = False) -> list[dict[str, Any]]:
     try:
         data = json.loads(path.read_bytes() if raw is None else raw)
     except (OSError, ValueError) as exc:
@@ -75,13 +78,15 @@ def parse_manifest(path: Path, *, raw: bytes | None = None, mode: str = "edit") 
             continue
         if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
             raise BenchmarkError(f"{task['id']}: missing prompt")
-        checked_argv(task.get("success_checks"), f"{task['id']}.success_checks")
-        checked_argv(task.get("regression_checks"), f"{task['id']}.regression_checks")
+        for stage in ("success_checks", "regression_checks"):
+            if require_checks or stage in task:
+                checked_argv(task.get(stage), f"{task['id']}.{stage}")
+            task.setdefault(stage, [])
         owners = task.get("owners", {})
         if not isinstance(owners, dict) or any(not isinstance(owners.get(v, []), list) or any(not isinstance(p, str) for p in owners.get(v, [])) for v in ("before", "after")):
             raise BenchmarkError(f"{task['id']}: owners must have before/after arrays of paths")
         setup = task.get("setup_commands", [])
-        if setup:
+        if setup != []:
             checked_argv(setup, f"{task['id']}.setup_commands")
     return tasks
 
@@ -119,8 +124,8 @@ def remove_worktree(repo: Path, path: Path) -> None:
 
 
 def modified_files(path: Path, commit: str) -> list[str]:
-    tracked = run_git(path, "diff", "--name-only", "-z", commit, "--").split("\\x00")
-    untracked = run_git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\\x00")
+    tracked = run_git(path, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", commit, "--").split("\x00")
+    untracked = run_git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\x00")
     return sorted(set(x for x in tracked + untracked if x))
 
 
@@ -175,23 +180,29 @@ def plan_trials(tasks: list[dict], trials: int, seed: int) -> list[tuple[dict, s
     return [run for pair in pairs for run in pair]
 
 
-def discovery_preflight(repo: Path, revisions: dict[str, str], tasks: list[dict], root: Path) -> list[dict]:
+def discovery_preflight(repo: Path, revisions: dict[str, str], tasks: list[dict], root: Path, *,
+                        opts: argparse.Namespace | None = None) -> list[dict]:
     results = []
     for variant, revision in revisions.items():
         cwd = new_worktree(repo, root, f"preflight-{variant}", revision)
         try:
+            boundary = discovery_boundary(opts, cwd) if opts else None
             for task in tasks:
                 valid = valid_expected(task["expected"][variant], cwd)
+                sandbox_ready = boundary is None or boundary["exit_code"] == 0
                 results.append({"variant": variant, "task_id": task["id"],
-                                "status": "ready" if valid else "preflight_invalid",
-                                "reason": None if valid else "discovery_expected_answer_not_in_snapshot"})
+                                "status": "ready" if valid and sandbox_ready else "preflight_invalid",
+                                "reason": "read_only_sandbox_blocked" if not sandbox_ready else
+                                None if valid else "discovery_expected_answer_not_in_snapshot",
+                                "sandbox_boundary": boundary})
         finally:
             remove_worktree(repo, cwd)
     return results
 
 
 def preflight(repo: Path, root: Path, revisions: dict[str, str], tasks: list[dict[str, Any]],
-              timeout: int) -> list[dict]:
+              timeout: int, *, verifier: IsolatedVerifier | None = None,
+              manifest_sha: str = "") -> list[dict]:
     results = []
     for variant, revision in revisions.items():
         for task in tasks:
@@ -203,21 +214,40 @@ def preflight(repo: Path, root: Path, revisions: dict[str, str], tasks: list[dic
                 continue
             cwd = new_worktree(repo, root, f"preflight-{variant}-{task['id']}", revision)
             try:
-                entry["setup_checks"] = execute_checks(task.get("setup_commands", []), cwd, timeout)
-                if entry["setup_checks"] and not all_pass(entry["setup_checks"]):
+                if verifier:
+                    try:
+                        checks = verifier.verify(cwd, task, revision, manifest_sha, timeout,
+                                                 protected=protected_digests(cwd, verifier.protected), phase="baseline")
+                    except (ValueError, OSError, subprocess.SubprocessError):
+                        entry["reason"] = "vm_or_artifact_invalid"
+                        continue
+                    entry["verification"] = checks
+                    if checks["status"] != "ready":
+                        entry["reason"] = checks["status"]
+                        continue
+                    for key in ("setup_checks", "success_checks", "regression_checks"):
+                        entry[key] = checks[key]
+                else:
+                    entry["setup_checks"] = execute_checks(task.get("setup_commands", []), cwd, timeout)
+                    if entry["setup_checks"] and not all_pass(entry["setup_checks"]):
+                        entry["reason"] = "setup_failed"
+                        continue
+                    if run_git(cwd, "diff", "--name-only", revision, "--"):
+                        entry["reason"] = "setup_modified_frozen_tracked_files"
+                        continue
+                    entry["success_checks"] = execute_checks(task["success_checks"], cwd, timeout, task["_contracts"])
+                    entry["regression_checks"] = execute_checks(task["regression_checks"], cwd, timeout)
+                if len(entry["setup_checks"]) != len(task.get("setup_commands", [])) or (
+                    entry["setup_checks"] and not all_pass(entry["setup_checks"])
+                ):
                     entry["reason"] = "setup_failed"
                     continue
-                if run_git(cwd, "diff", "--name-only", revision, "--"):
-                    entry["reason"] = "setup_modified_frozen_tracked_files"
-                    continue
-                entry["success_checks"] = execute_checks(task["success_checks"], cwd, timeout, task["_contracts"])
-                entry["regression_checks"] = execute_checks(task["regression_checks"], cwd, timeout)
                 if len(entry["success_checks"]) != len(task["success_checks"]) or any(
                     c["failure_reason"] != "behavioral_assertion" for c in entry["success_checks"]
                 ):
                     entry["reason"] = "baseline_red_unproven"
                 elif not all_pass(entry["regression_checks"]):
-                    entry["reason"] = "host_regression_not_green"
+                    entry["reason"] = "vm_regression_not_green" if verifier else "host_regression_not_green"
                 elif run_git(cwd, "diff", "--name-only", revision, "--"):
                     entry["reason"] = "verifier_modified_frozen_tracked_files"
                 else:
@@ -231,6 +261,15 @@ def preflight(repo: Path, root: Path, revisions: dict[str, str], tasks: list[dic
 
 
 DISCOVERY_PROFILE = "agent_legible_discovery_v4"
+ISOLATED_PROFILE = "agent_legible_isolated_v4"
+EDIT_INSTRUCTIONS = (
+    "Use the restricted workspace to discover and edit the code. Do not run pytest or invoke it through a "
+    "test wrapper. Any configured independent tests are run by the benchmark controller after you finish."
+)
+ISOLATED_INSTRUCTIONS = (
+    "Use the read-only navigation tools and the sandboxed patch tool. Independent checks will run in an offline "
+    "verifier VM after you finish. You have no shell or test tool."
+)
 
 
 def discovery_permissions(manifest: Path, cwd: Path) -> list[str]:
@@ -257,12 +296,52 @@ raise SystemExit(1)
     return execute_command(argv, cwd, opts.check_timeout)
 
 
+def isolated_inputs(opts: argparse.Namespace, cwd: Path) -> list[Path]:
+    vm = opts.verifier
+    paths = [opts.manifest, cwd / ".git", vm.profile, vm.kernel, vm.initramfs, *map(Path, vm.external)]
+    if opts.oracle_contract:
+        paths.append(opts.oracle_contract.resolve())
+    return list(dict.fromkeys(paths))
+
+
+def isolated_permissions(opts: argparse.Namespace, cwd: Path) -> list[str]:
+    rules = [json.dumps(str(path)) + '="deny"' for path in isolated_inputs(opts, cwd)]
+    entries = ", ".join(['":root"="read"', '":workspace_roots"="write"', *rules])
+    return ["-c", f"permissions.{ISOLATED_PROFILE}.filesystem={{{entries}}}",
+            "-c", f"permissions.{ISOLATED_PROFILE}.network.enabled=false"]
+
+
+def isolated_boundary(opts: argparse.Namespace, cwd: Path) -> dict:
+    probe = """import errno, os, socket, sys
+from pathlib import Path
+for path in sys.argv[1:]:
+    try:
+        with Path(path).open("rb") as handle:
+            handle.read(1)
+    except PermissionError:
+        continue
+    raise SystemExit(1)
+assert os.access(".", os.W_OK) and not os.access("..", os.W_OK)
+try:
+    socket.socket(socket.AF_INET)
+except OSError as error:
+    raise SystemExit(0 if error.errno in (errno.EPERM, errno.EACCES) else 1)
+raise SystemExit(1)
+"""
+    command = [opts.codex, "sandbox", "--include-managed-config", *isolated_permissions(opts, cwd),
+               "-P", ISOLATED_PROFILE, "-C", str(cwd), "--", sys.executable, "-I", "-S", "-c", probe,
+               *map(str, isolated_inputs(opts, cwd))]
+    return execute_command(command, cwd, opts.check_timeout)
+
+
 def codex_args(opts: argparse.Namespace, cwd: Path) -> list[str]:
     args = [opts.codex, "-a", "never", "exec", "--json", "--ephemeral", "--cd", str(cwd)]
-    if opts.mode == "discovery":
+    if opts.mode in {"discovery", "isolated-verifier"}:
         server_args = json.dumps(["-B", str(Path(__file__).resolve().with_name("discovery_navigation.py")), str(cwd)])
+        profile = DISCOVERY_PROFILE if opts.mode == "discovery" else ISOLATED_PROFILE
+        permissions = discovery_permissions(opts.manifest, cwd) if opts.mode == "discovery" else isolated_permissions(opts, cwd)
         args.extend([
-            *discovery_permissions(opts.manifest, cwd), "-c", f'default_permissions="{DISCOVERY_PROFILE}"',
+            *permissions, "-c", f'default_permissions="{profile}"',
             "--strict-config", "--ignore-user-config", "--disable", "shell_tool", "--disable", "unified_exec",
             "--disable", "apps", "--disable", "plugins", "--disable", "hooks",
             "-c", "web_search=" + json.dumps("disabled"),
@@ -273,7 +352,11 @@ def codex_args(opts: argparse.Namespace, cwd: Path) -> list[str]:
             "-c", f"projects.{json.dumps(str(cwd))}.trust_level=" + json.dumps("untrusted"),
         ])
     else:
-        args.extend(["--sandbox", opts.sandbox])
+        args.extend(["--sandbox", opts.sandbox, "-c", NETWORK_DISABLED])
+        if not opts.qualify_sandbox:
+            args.extend(["-c", "sandbox_workspace_write.writable_roots=[]",
+                         "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                         "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"])
     if opts.model:
         args.extend(["--model", opts.model])
     return [*args, "-"]
@@ -368,7 +451,16 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
     print(f"Running {label}", flush=True)
     try:
         discovery = opts.mode == "discovery"
-        setup = execute_checks(task.get("setup_commands", []), cwd, opts.check_timeout)
+        verifier = getattr(opts, "verifier", None)
+        frozen = {}
+        if verifier:
+            boundary = isolated_boundary(opts, cwd)
+            record["isolated_agent_sandbox"] = boundary
+            if boundary["exit_code"] != 0:
+                record["environment"] = "blocked"
+                return record
+            frozen = protected_digests(cwd, verifier.protected)
+        setup = execute_checks(task.get("setup_commands", []), cwd, opts.check_timeout) if opts.qualify_sandbox else []
         record["setup_checks"] = setup
         if (setup and not all_pass(setup)) or run_git(cwd, "diff", "--name-only", revision, "--"):
             record["environment"] = "blocked"
@@ -381,14 +473,15 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
                 record["environment"] = "blocked"
                 return record
             expected = task["expected"][variant]
-            prompt = task["question"] + "\\n" + PROMPT_FORMAT
+            prompt = task["question"] + "\n" + PROMPT_FORMAT
             owners = expected["owner_paths"]
         else:
             prompt = task["prompt"]
+            prompt = (ISOLATED_INSTRUCTIONS if verifier else EDIT_INSTRUCTIONS) + "\n\n" + prompt
             owners = task.get("owners", {}).get(variant, [])
         agent, summary = call_agent(opts, cwd, root, label, prompt, lambda trace:
                                     summarize_jsonl(trace, owners, repo_root=cwd, relative_cwd_known=False,
-                                                    capture_answer=discovery, discovery_tools=discovery))
+                                                    capture_answer=discovery, discovery_tools=discovery or verifier is not None))
         answer = summary.pop("_discovery_answer", None)
         record.update(summary)
         complete = agent["exit_code"] == 0 and not summary["thread_failed"]
@@ -411,6 +504,9 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
                set(e.get("operations_detected", [])) & {"test_execution", "environment_diagnostics"}
                for e in summary["events"]):
             record["environment"] = "confounded"
+        if opts.mode == "edit" and any(e.get("pytest_execution") for e in summary["events"]):
+            record["agent_test_execution_observed"] = True
+            record["environment"] = "confounded"
         if status == "interrupted":
             return record
         if discovery:
@@ -426,10 +522,40 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
                 # Legacy verified indicates an independent oracle, which is the offline scorer here.
                 record["verified"] = score["passed"]
             return record
-        success = execute_checks(task["success_checks"], cwd, opts.check_timeout, task["_contracts"])
-        regression = execute_checks(task["regression_checks"], cwd, opts.check_timeout,
-                                    [{"regex": r"^(?:E\s+.*(?:assert|AssertionError)|AssertionError:?.*)$"}
-                                     for _ in task["regression_checks"]])
+        if verifier:
+            if summary["shell_commands"] or summary["tool_calls_not_instrumented"]:
+                record["environment"] = "confounded"
+                record["verification"] = {"status": "unexpected_agent_tool"}
+                return record
+            try:
+                if frozen != protected_digests(cwd, verifier.protected):
+                    raise ValueError("Protected path changed")
+                evaluation = verifier.verify(cwd, task, revision, opts.manifest_sha, opts.check_timeout,
+                                             protected=frozen, phase="candidate")
+            except (ValueError, OSError, subprocess.SubprocessError):
+                record["environment"] = "blocked"
+                record["verification"] = {"status": "candidate_or_verifier_input_invalid"}
+                return record
+            record["verification"] = evaluation
+            setup = evaluation.get("setup_checks", [])
+            record["setup_checks"] = setup
+            if (evaluation["status"] != "ready" or len(setup) != len(task.get("setup_commands", []))
+                    or setup and not all_pass(setup)):
+                record["environment"] = "blocked"
+                return record
+            success, regression = evaluation["success_checks"], evaluation["regression_checks"]
+        else:
+            if not opts.allow_host_tests or not complete or record["environment"] != "ready":
+                return record
+            if not opts.qualify_sandbox:
+                setup = execute_checks(task.get("setup_commands", []), cwd, opts.check_timeout)
+                record["setup_checks"] = setup
+                if setup and not all_pass(setup):
+                    record["environment"] = "blocked"
+                    return record
+            success = execute_checks(task["success_checks"], cwd, opts.check_timeout, task["_contracts"])
+            regression = execute_checks(task["regression_checks"], cwd, opts.check_timeout,
+                                        [REGRESSION_ASSERTION] * len(task["regression_checks"]))
         record.update({"success_checks": success, "regression_checks": regression})
         for stage, checks, passed, failed in (("behavior", success, "correct", "incorrect"),
                                                 ("regression", regression, "passed", "failed")):
@@ -472,7 +598,11 @@ def options() -> argparse.Namespace:
     p.add_argument("--before", required=True, help="Baseline Git commit/tag")
     p.add_argument("--after", required=True, help="Refactored Git commit/tag")
     p.add_argument("--out", type=Path, required=True, help="Fresh output directory outside the repo")
-    p.add_argument("--mode", choices=("edit", "discovery"), default="edit")
+    p.add_argument("--mode", choices=("edit", "discovery", "isolated-verifier"), default="edit")
+    p.add_argument("--verifier-vm-profile", type=Path, help="Pinned offline QEMU image and verifier inputs")
+    p.add_argument("--verifier-qemu", default="qemu-system-x86_64", help="Trusted QEMU executable")
+    p.add_argument("--verifier-boot-timeout", type=int, default=120, help="QEMU boot/shutdown allowance in seconds")
+    p.add_argument("--readiness-only", action="store_true", help="Run discovery or VM readiness without model sessions")
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--codex", default="codex", help="Codex executable")
     p.add_argument("--model", help="Pin the Codex model for comparability")
@@ -483,8 +613,13 @@ def options() -> argparse.Namespace:
     p.add_argument("--keep-worktrees", action="store_true", help="Retain agent changes for manual review")
     p.add_argument("--skip-preflight", action="store_true", help="Skip host preflight; comparison will be inconclusive")
     p.add_argument("--dry-run", action="store_true", help="Show plan without Codex, checks or worktree creation")
-    p.add_argument("--approve-manifest", action="store_true", help="Confirm review and authorize all host commands and planned Codex sessions")
+    p.add_argument("--approve-manifest", action="store_true",
+                   help="Approve planned Codex usage and any selected VM checks")
+    p.add_argument("--allow-host-tests", action="store_true",
+                   help="Explicitly authorize reviewed setup and tests to execute edited code on the development host")
     p.add_argument("--show-commands", action="store_true", help="Print exact host command arguments during dry-run review")
+    p.add_argument("--sandbox-probe-python",
+                   help="Opt into advanced sandbox qualification with this Python executable")
     p.add_argument("--sandbox-smoke", action="store_true", help="Approve one extra Codex session per task and revision to replay a host-green check")
     p.add_argument("--oracle-contract", type=Path, help="Optional SHA-256-bound expected-failure metadata for unchanged legacy manifests")
     return p.parse_args()
@@ -493,10 +628,21 @@ def options() -> argparse.Namespace:
 def main() -> int:
     opts = options()
     opts.sandbox = "read-only" if opts.mode == "discovery" else "workspace-write"
+    isolated = opts.mode == "isolated-verifier"
+    opts.qualify_sandbox = opts.mode == "edit" and bool(opts.sandbox_smoke or opts.sandbox_probe_python)
+    opts.verifier = None
     try:
+        if opts.mode != "edit" and (opts.allow_host_tests or opts.sandbox_probe_python):
+            raise BenchmarkError("Host test opt-in and the edit sandbox probe require edit mode")
         if opts.show_commands and not opts.dry_run:
             raise BenchmarkError("--show-commands is available only with --dry-run")
-        if min(opts.trials, opts.timeout, opts.check_timeout) < 1:
+        if opts.readiness_only and (opts.mode == "edit" or opts.skip_preflight or opts.sandbox_smoke):
+            raise BenchmarkError("Readiness-only requires discovery or isolated verification with its normal readiness gates")
+        if isolated and (not opts.verifier_vm_profile or opts.sandbox_smoke or opts.skip_preflight or opts.keep_worktrees):
+            raise BenchmarkError("Isolated verification requires a VM profile and its own readiness gates and cleanup")
+        if not isolated and opts.verifier_vm_profile:
+            raise BenchmarkError("A VM profile requires --mode isolated-verifier")
+        if min(opts.trials, opts.timeout, opts.check_timeout, opts.verifier_boot_timeout) < 1:
             raise BenchmarkError("Trials and timeouts must be positive")
         repo, out, manifest = (path.resolve() for path in (opts.repo, opts.out, opts.manifest))
         opts.manifest = manifest
@@ -514,19 +660,33 @@ def main() -> int:
             repo in manifest.parents or out in manifest.parents or opts.oracle_contract or opts.sandbox_smoke
         ):
             raise BenchmarkError("Discovery requires an external manifest and accepts no edit oracle or sandbox test replay")
-        tasks = parse_manifest(manifest, raw=raw, mode=opts.mode)
-        oracle_hash = bind_oracles(tasks, opts.oracle_contract, manifest_hash) if opts.mode == "edit" else None
+        opts.manifest_sha = manifest_hash
+        tasks = parse_manifest(manifest, raw=raw, mode="edit" if isolated else opts.mode,
+                               require_checks=isolated or opts.qualify_sandbox)
+        oracle_hash = bind_oracles(tasks, opts.oracle_contract, manifest_hash) if opts.mode != "discovery" else None
         revisions = {side: run_git(repo, "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}")
                      for side, rev in (("before", opts.before), ("after", opts.after))}
         plan = plan_trials(tasks, opts.trials, opts.seed)
         smoke_count = 2 * len(tasks) if opts.sandbox_smoke else 0
         print(f"Repo: {repo}\nManifest: {manifest}\nRevisions: {revisions}\nManifest SHA-256: {manifest_hash}\n"
-              f"Tasks: {len(tasks)}, trials: {opts.trials}, planned Codex sessions: {len(plan)} plus {smoke_count} smoke")
+              f"Tasks: {len(tasks)}, trials: {opts.trials}, planned Codex sessions: "
+              f"{0 if opts.readiness_only else len(plan)} plus {smoke_count} smoke")
         for index, (task, trial, variant) in enumerate(plan, 1):
             print(f"  {index}. {task['id']} / {trial} / {variant}")
-        missing = [task["id"] for task in tasks if opts.mode == "edit" and not task["_contracts"]]
+        missing = [task["id"] for task in tasks if (isolated or opts.qualify_sandbox) and not task["_contracts"]]
+        if isolated:
+            print("Independent checks run only in disposable offline VMs; no model smoke is scheduled.")
         if missing:
             print("Missing expected_failure contracts: " + ", ".join(missing))
+        if opts.mode == "edit":
+            if opts.allow_host_tests:
+                print("Host execution authorized: reviewed manifest commands can execute edited code outside the Codex sandbox.")
+                if not opts.qualify_sandbox:
+                    print("Host setup and checks run after each completed Codex session.")
+            else:
+                print("Host commands skipped unless explicitly authorized with --allow-host-tests.")
+            if opts.qualify_sandbox:
+                print(f"Advanced sandbox gate uses {opts.sandbox_probe_python or sys.executable}; requires --allow-host-tests.")
         if opts.dry_run:
             if opts.show_commands:
                 for task in tasks:
@@ -535,25 +695,40 @@ def main() -> int:
                             print(f"  {task['id']} / {stage} / {shlex.join(argv)}")
             print("DRY RUN: no worktrees, checks or Codex processes started")
             return 0
-        if not opts.approve_manifest:
-            raise BenchmarkError("Review the manifest commands and authorize this plan with --approve-manifest")
+        if not opts.approve_manifest and not (opts.readiness_only and opts.mode == "discovery"):
+            raise BenchmarkError("Authorize planned model usage and selected VM checks with --approve-manifest")
+        if opts.qualify_sandbox and not opts.allow_host_tests:
+            raise BenchmarkError("Advanced edit qualification requires explicit --allow-host-tests")
         if opts.sandbox_smoke and opts.skip_preflight:
             raise BenchmarkError("Sandbox smoke requires host preflight")
         executable = shutil.which(opts.codex)
         if not executable:
             raise BenchmarkError("Codex CLI executable unavailable")
         opts.codex = str(Path(executable).absolute())
+        if opts.qualify_sandbox:
+            python = shutil.which(opts.sandbox_probe_python or sys.executable)
+            if not python:
+                raise BenchmarkError("Python executable for the sandbox runtime check is unavailable")
+            opts.sandbox_probe_python = str(Path(python).absolute())
         out.mkdir(parents=True, mode=0o700, exist_ok=True)
         out.chmod(0o700)
-        settings = {"mode": opts.mode, "sandbox_mode": opts.sandbox, "model_requested": opts.model,
+        settings = {"mode": opts.mode, "workflow": "advanced" if isolated or opts.qualify_sandbox else "simple",
+                    "sandbox_mode": opts.sandbox, "model_requested": opts.model,
                     "agent_timeout_seconds": opts.timeout, "check_timeout_seconds": opts.check_timeout,
                     "json": True, "ephemeral": True, "approval_policy": "never",
-                    "tools": "read_only_navigation_mcp" if opts.mode == "discovery" else "configured_codex_tools"}
+                    "sandbox_probe_python": opts.sandbox_probe_python if opts.mode == "edit" else None,
+                    "workspace_network_access": False,
+                    "verification_environment": "isolated_qemu" if isolated else "offline_discovery" if opts.mode == "discovery"
+                    else "host" if opts.allow_host_tests else "none",
+                    "tools": {"discovery": "read_only_navigation_mcp",
+                              "isolated-verifier": "navigation_mcp_and_sandboxed_patch"}.get(opts.mode, "configured_codex_tools")}
         meta = {
             **settings, "tool": "agent-legible-codebase v4", "revisions": revisions, "manifest_sha256": manifest_hash,
             "oracle_contract_sha256": oracle_hash, "trials_per_task": opts.trials, "seed": opts.seed,
             "task_ids": [t["id"] for t in tasks], "holdout_tasks": [t["id"] for t in tasks if t.get("holdout") is True],
-            "planned_run_count": len(plan), "planned_order": [
+            "planned_run_count": 0 if opts.readiness_only else len(plan),
+            "planned_model_session_count": 0 if opts.readiness_only else len(plan) + smoke_count,
+            "planned_order": [
                 {"task_id": t["id"], "trial_id": trial, "variant": v} for t, trial, v in plan], "raw_logs_retained": opts.keep_raw,
             "study_kind": "instrumentation_pilot" if opts.trials == 1 else "performance_study",
             "codex_cli_version": resolve_cli_version(opts.codex, out, opts.check_timeout),
@@ -563,15 +738,59 @@ def main() -> int:
         }
         results: list[dict] = []
         try:
-            if not opts.skip_preflight:
-                checks = (discovery_preflight(repo, revisions, tasks, out) if opts.mode == "discovery"
-                          else preflight(repo, out, revisions, tasks, opts.check_timeout))
-                meta["host_preflight"] = checks
+            if isolated:
+                try:
+                    opts.verifier = IsolatedVerifier(opts.verifier_vm_profile, opts.verifier_qemu, out,
+                                                     boot_timeout=opts.verifier_boot_timeout)
+                    vm = opts.verifier
+                    inputs = [manifest, vm.profile, vm.kernel, vm.initramfs, *map(Path, vm.external)]
+                    if opts.oracle_contract:
+                        inputs.append(opts.oracle_contract.resolve())
+                    if any(repo in path.parents or out in path.parents for path in inputs):
+                        raise ValueError("VM and oracle inputs must be external to both repo and output")
+                    meta["verifier_readiness"] = vm.probe()
+                    if meta["verifier_readiness"]["status"] == "ready":
+                        boundary_cwd = new_worktree(repo, out, "isolated-agent-boundary", revisions["before"])
+                        try:
+                            meta["isolated_agent_boundary"] = isolated_boundary(opts, boundary_cwd)
+                        finally:
+                            remove_worktree(repo, boundary_cwd)
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    meta["verifier_readiness"] = {"status": "vm_configuration_or_artifact_invalid"}
+                if (meta["verifier_readiness"]["status"] != "ready"
+                        or (meta.get("isolated_agent_boundary") or {}).get("exit_code") != 0):
+                    meta["experiment_status"] = "environment_blocked"
+                    return 2
+            if opts.qualify_sandbox:
+                with tempfile.TemporaryDirectory(prefix=".sandbox-runtime-", dir=out) as temp:
+                    runtime = check_runtime(opts.codex, opts.sandbox_probe_python, Path(temp))
+                meta["sandbox_runtime"] = runtime
+                if runtime["status"] != "ready":
+                    meta["experiment_status"] = "environment_blocked"
+                    print(f"Sandbox runtime blocked: {runtime['reason']}. No model sessions started.", file=sys.stderr)
+                    return 2
+            if (isolated or opts.qualify_sandbox or opts.mode == "discovery") and not opts.skip_preflight:
+                checks = (discovery_preflight(repo, revisions, tasks, out, opts=opts) if opts.mode == "discovery"
+                          else preflight(repo, out, revisions, tasks, opts.check_timeout, verifier=opts.verifier,
+                                         manifest_sha=manifest_hash))
+                meta["verifier_preflight" if isolated else "discovery_preflight" if opts.mode == "discovery"
+                     else "host_preflight"] = checks
                 meta["preflight_status"] = "ready" if len(checks) == 2 * len(tasks) and all(
                     c["status"] == "ready" for c in checks) else "preflight_invalid"
                 if meta["preflight_status"] != "ready":
-                    meta["experiment_status"] = "invalid"
+                    meta["experiment_status"] = "environment_blocked" if isolated and any(
+                        c.get("reason") in {"vm_or_artifact_invalid", "vm_timeout", "vm_launch_failed",
+                                           "artifact_mismatch", "guest_isolation_failed", "guest_job_failed",
+                                           "invalid_guest_result"} or any(
+                            stage_result.get("failure_reason") in {"timeout", "environment_error"}
+                            for stage in ("setup_checks", "success_checks", "regression_checks")
+                            for stage_result in c.get(stage, [])
+                        ) for c in checks
+                    ) else "invalid"
                     return 2
+            if opts.readiness_only:
+                meta["experiment_status"] = "readiness_checked"
+                return 0
             if opts.sandbox_smoke:
                 checks = sandbox_smoke(repo, out, revisions, tasks, opts)
                 meta["sandbox_smoke"] = checks

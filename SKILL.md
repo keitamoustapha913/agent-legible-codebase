@@ -16,6 +16,7 @@ description: Improve source-level codebase discoverability, change locality, dee
 | Improve actual source architecture | **refactor** | Small reversible source changes, verified behavior, new guardrails where useful |
 | Gather concrete Codex navigation failures | **trace** | Parsed JSONL with attributable source bytes, independent provider usage and event evidence |
 | Compare repository design on real edits | **benchmark** | Counterbalanced paired edit trials with independent checks, usage and evidence |
+| Compare edits when tests need a separate runtime | **benchmark (isolated verifier)** | Restricted sandboxed editing and independent checks in offline disposable VMs |
 | Compare how quickly agents locate and explain code | **benchmark (discovery)** | Read-only paired trials with offline owner, symbol and dependency scoring |
 
 Use **audit** if requested to review; **refactor** if the user explicitly requests source changes. **Trace/benchmark** do not automatically mean refactor. Running large or costly autonomous benchmarks requires explicit user authorization. Do not claim measured savings without real paired runs.
@@ -48,12 +49,12 @@ In **audit**, stop after 2–5 candidate opportunities with concrete affected pa
 
 ## Workflow B — empirical Codex measurement
 
-**Benchmark only when users approve the cost.** Read `references/codex-benchmark.md`, `references/task-design.md` and `references/benchmark-environment.md`.
+**Benchmark only when users approve model usage.** Start with the [simple benchmark command](README.md#run-a-benchmark).
 
-1. Freeze authentic task prompts and pin immutable before and after revisions. Edit tasks need independent success checks that fail for an expected behavioral reason and regression checks that pass at both revisions. Discovery tasks need natural-language navigation questions and offline path, symbol and dependency answers.
-2. Keep the CLI, model, sandbox, tools and timeouts fixed across both variants. Dry-run outside the repository with `--dry-run --show-commands`. Review all trusted host commands and approve usage before using `--approve-manifest`. An optional `--sandbox-smoke` consumes additional Codex sessions and is separate from host checks.
-3. Keep trials fresh and counterbalanced. A single pair per task checks instrumentation. At least three pairs per task support a preliminary trend. Add holdouts when the design choices were informed by the measured tasks.
-4. Check the generated report for independent correctness, environment, oracle and telemetry conditions before comparing usage. Inspect per-task results and validate linked hypotheses in the source before changing its architecture.
+1. Choose equivalent tasks and pin the original and refactored Git commits. An edit task needs an ID and a prompt. Discovery tasks use `--mode discovery` with a question and offline expected answers.
+2. Dry-run the plan outside the target repository. With approval, use `--approve-manifest`. The runner uses fresh `codex exec --json` sessions and disposable worktrees for both revisions. Edit sessions stay restricted and the prompt tells Codex to skip pytest. Discovery sessions have read-only navigation tools.
+3. Use `--allow-host-tests` only after the user approves the reviewed commands and trusts the candidate code they can execute on the host. The default skips host commands. [Isolated verification](references/isolated-verifier.md) is available when a separate offline VM is needed.
+4. Read `report.md` for independent correctness, provider input, navigation and change scope. Use one pair to check instrumentation and at least three verified pairs per task for a preliminary trend. Keep inference separate from observation when checks or telemetry are missing.
 
 To analyze one saved trace offline:
 

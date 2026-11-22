@@ -1,0 +1,21 @@
+{
+  "tasks": [
+    {
+      "id": "invoice-money-discovery",
+      "mode": "discovery",
+      "question": "Find the function that decides which currency to use for an invoice amount in the Sales KPI PowerPoint. Also identify the file that renders the invoice summary. Explain the function's responsibility in one sentence.",
+      "expected": {
+        "before": {
+          "owner_paths": ["backend/app/domains/sales/dashboard_report_data.py"],
+          "symbols": ["_invoice_money"],
+          "dependency_paths": ["backend/app/domains/sales/dashboard_report.py"]
+        },
+        "after": {
+          "owner_paths": ["backend/app/domains/sales/dashboard_report_invoices.py"],
+          "symbols": ["_invoice_money"],
+          "dependency_paths": ["backend/app/domains/sales/dashboard_report.py"]
+        }
+      }
+    }
+  ]
+}

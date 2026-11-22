@@ -43,14 +43,14 @@ def terminate_process_tree(proc: subprocess.Popen) -> None:
 
 
 def run_process(argv: list[str], cwd: Path, timeout: float, *, stdout: Any, stderr: Any,
-                prompt: str | None = None) -> dict:
+                prompt: str | None = None, env: dict[str, str] | None = None) -> dict:
     started = time.monotonic()
     returncode = None
     reason = None
     try:
         with subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr,
                               stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-                              text=True, start_new_session=os.name == "posix") as proc:
+                              text=True, start_new_session=os.name == "posix", env=env) as proc:
             try:
                 proc.communicate(prompt, timeout=timeout)
                 returncode = proc.returncode

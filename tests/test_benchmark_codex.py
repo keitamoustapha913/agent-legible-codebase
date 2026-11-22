@@ -70,8 +70,19 @@ args = sys.argv[1:]
 if '--version' in args:
     print('codex-cli fake-0.1')
     sys.exit(0)
+if args[0] == 'sandbox':
+    assert ':workspace' in args and 'sandbox_workspace_write.network_access=false' in args
+    if '--' in args and (Path(__file__).parent / 'block-runtime').exists():
+        print(json.dumps({'probe': 'socketpair', 'status': 'error', 'errno': 1}))
+        sys.exit(1)
+    import os
+    i = args.index('--')
+    os.execv(args[i + 1], args[i + 1:])
+(Path(__file__).parent / 'model-called').touch()
 if 'exec' not in args or '--json' not in args:
     sys.exit(3)
+assert args[args.index('--sandbox') + 1] == 'workspace-write'
+assert 'sandbox_workspace_write.network_access=false' in args
 cwd = Path(args[args.index('--cd') + 1])
 prompt = sys.stdin.read()
 if prompt.startswith("Run this one command"):
@@ -93,10 +104,23 @@ for event in [
             out = root / "results"
             argv = [sys.executable, str(SCRIPTS / "benchmark_codex.py"), "--repo", str(repo),
                     "--manifest", str(manifest), "--before", "HEAD", "--after", "HEAD", "--out", str(out),
-                    "--trials", "1", "--approve-manifest", "--codex", str(fake), "--model", "synthetic-test", "--timeout", "15"]
+                     "--trials", "1", "--approve-manifest", "--allow-host-tests", "--sandbox-probe-python", sys.executable, "--codex", str(fake), "--model", "synthetic-test", "--timeout", "15"]
             dry = subprocess.run(argv + ["--dry-run"], capture_output=True, text=True, check=False)
             self.assertEqual(dry.returncode, 0, dry.stderr)
             self.assertFalse(out.exists())
+            self.assertFalse((root / "model-called").exists())
+            (root / "block-runtime").touch()
+            blocked = root / "blocked"
+            result = subprocess.run(argv + ["--out", str(blocked), "--sandbox-smoke"], capture_output=True,
+                                    text=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            blocked_doc = json.loads((blocked / "results.json").read_text())
+            self.assertEqual(blocked_doc["metadata"]["sandbox_runtime"]["reason"], "sandbox_python_local_ipc")
+            self.assertNotIn("host_preflight", blocked_doc["metadata"])
+            self.assertEqual(blocked_doc["runs"], [])
+            self.assertIn("sandbox infrastructure", (blocked / "report.md").read_text().lower())
+            self.assertFalse((root / "model-called").exists())
+            (root / "block-runtime").unlink()
             run = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=90)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             data = json.loads((out / "results.json").read_text())

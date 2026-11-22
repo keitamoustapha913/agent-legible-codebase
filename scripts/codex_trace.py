@@ -110,6 +110,7 @@ def command_evidence(item: dict, item_id: str, step: int, line: int, fallback: s
         "exit_code": exit_code, "execution_status": item.get("status"), "command_fingerprint": signature,
         "environment_signals": diagnostic_labels(output) if check_like and exit_code != 0 else [],
         "test_fingerprint": signature if "test_execution" in operations else None,
+        "pytest_execution": "test_execution" in operations and bool(re.search(r"\bpytest\b", command)),
         "output_missing_or_empty": status in {"missing", "partial"},
         "search_fingerprint": signature if "source_search" in operations else None,
     }

@@ -1,0 +1,18 @@
+{
+  "kernel": {
+    "path": "/path/to/reviewed/bzImage",
+    "sha256": "<kernel sha256>"
+  },
+  "initramfs": {
+    "path": "/path/to/reviewed/verifier.cpio.gz",
+    "sha256": "<initramfs sha256>"
+  },
+  "external_inputs": {
+    "/tmp/qworks-sales-benchmark.W7QcTc/test_sales_invoice_export.py": "3d90aa1f9a65849bdcf2b60d9fdc224ef4fc37dd375c92ba7d4bbd01eab6c20b"
+  },
+  "protected_paths": [
+    "backend/pyproject.toml",
+    "backend/tests/read_models/test_sales_dashboard_report.py"
+  ],
+  "scratch_paths": ["backend/.venv"]
+}

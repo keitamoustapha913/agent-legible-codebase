@@ -89,11 +89,23 @@ def paired_table(pairs: list[tuple[str, dict, dict]], tasks: list[str], fields: 
 def decision(meta: dict, runs: list[dict], pairs: list[tuple[str, dict, dict]],
              matched: list[tuple[str, dict, dict]], tasks: list[str], incomplete: int,
              legacy: bool, mode: str) -> tuple[str, str]:
+    if mode == "isolated-verifier" and (
+        (meta.get("verifier_readiness") or {}).get("status") != "ready"
+        or (meta.get("isolated_agent_boundary") or {}).get("exit_code") != 0
+    ):
+        return "INVALID", "The isolated verifier VM or restricted agent boundary could not be validated."
+    runtime = meta.get("sandbox_runtime") or {}
+    if runtime.get("status") == "environment_blocked":
+        if runtime.get("reason") == "sandbox_python_local_ipc":
+            return "INVALID", "Sandbox infrastructure blocked Python local IPC or thread wakeups before any model session."
+        return "INVALID", "The non-model workspace-write runtime check could not validate the environment."
     if (meta.get("preflight_status") in {"preflight_invalid", "interrupted"} or
         meta.get("sandbox_smoke_status") in {"environment_blocked", "environment_confounded"} or
         meta.get("experiment_status") in {"invalid", "environment_blocked", "environment_confounded"} or
         any(r.get("environment") in {"blocked", "confounded"} for r in runs)):
         return "INVALID", "Oracle, setup, or environment evidence blocks an efficiency decision."
+    if meta.get("experiment_status") == "readiness_checked":
+        return "INCONCLUSIVE", "Non-model readiness checks passed. No model sessions were run."
     if any(pass_run(a, mode) and (
         b.get("behavior") == "incorrect" or b.get("regression") == "failed"
         or "agent_completion" not in b and (b.get("correct") is False or b.get("verified") is False)
@@ -173,11 +185,122 @@ def hypotheses(runs: list[dict]) -> list[str]:
     return lines or ["No evidence-linked architecture hypothesis was generated from the available events."]
 
 
+def simple_outcome(meta: dict, pairs: list[tuple[str, dict, dict]],
+                   tasks: list[str], missing: int, run_count: int) -> tuple[str, str]:
+    state = meta.get("experiment_status")
+    if state == "readiness_checked":
+        return "Inconclusive", "Non-model readiness passed. No Codex sessions ran."
+    if state in {"environment_blocked", "environment_confounded", "invalid"}:
+        return "Inconclusive", "A runner or environment failure prevented a reliable comparison."
+    mode = meta["mode"]
+    for _, before, after in pairs:
+        if (pass_run(before, mode) and after.get("agent_completion") == "completed"
+                and after.get("environment") == "ready"
+                and (after.get("behavior") == "incorrect" or after.get("regression") == "failed")):
+            return "Worsened", "An independently checked task passed before the refactor and failed after it."
+    if state != "completed" or missing or meta.get("planned_run_count") != run_count:
+        return "Inconclusive", "The planned pairs did not all complete."
+    if not pairs or any(not (pass_run(a, mode) and pass_run(b, mode)) for _, a, b in pairs):
+        return "Inconclusive", "The tasks did not all pass independent checks on both revisions."
+    if not meta.get("model_requested"):
+        return "Inconclusive", "Pin the same model to interpret usage differences."
+    deltas = []
+    for task in tasks:
+        subset = [pair for pair in pairs if pair[0] == task]
+        inputs = get_metrics(subset, "total_input_tokens")
+        if len(inputs) < 3 or len(inputs) != len(subset):
+            return "Inconclusive", "A preliminary usage trend requires at least three verified pairs per task with reported input."
+        deltas.append(statistics.median(after - before for before, after in inputs))
+    if deltas and all(n <= 0 for n in deltas) and any(n < 0 for n in deltas):
+        return "Helped", "Verified tasks used less provider input in at least one task and none used more."
+    if deltas and all(n >= 0 for n in deltas) and any(n > 0 for n in deltas):
+        return "Worsened", "Verified tasks used more provider input in at least one task and none used less."
+    return "Inconclusive", "Provider input was unchanged or moved in opposite directions across tasks."
+
+
+def simple_measure(run: dict, field: str) -> int | None:
+    value = run.get(field)
+    if isinstance(value, list):
+        return len(value)
+    return value if type(value) is int else None
+
+
+def simple_table(title: str, tasks: list[str], pairs: list[tuple[str, dict, dict]],
+                 fields: tuple[tuple[str, str], ...]) -> list[str]:
+    lines = ["", f"## {title}", "", row("Task", *(label for _, label in fields)),
+             row("---", *("---" for _ in fields))]
+    for task in tasks:
+        cells = []
+        for key, _ in fields:
+            measurements = [(a, b) for name, before, after in pairs if name == task
+                            if (a := simple_measure(before, key)) is not None
+                            and (b := simple_measure(after, key)) is not None]
+            if measurements:
+                a, b = (statistics.median(values) for values in zip(*measurements))
+                cells.append(f"{a:,.1f}".removesuffix(".0") + " → "
+                             + f"{b:,.1f}".removesuffix(".0") + f" ({len(measurements)})")
+            else:
+                cells.append(None)
+        lines.append(row(task, *cells))
+    return lines
+
+
+def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
+    pairs, missing = pair_runs(runs)
+    tasks = sorted({r["task_id"] for r in runs} | set(meta.get("task_ids", [])))
+    outcome, reason = simple_outcome(meta, pairs, tasks, missing, len(runs))
+    observed = [p for p in pairs if all(r.get("agent_completion") == "completed" and
+                                      r.get("environment") == "ready" for r in p[1:])]
+    lines = [
+        "# Codex benchmark", "", f"**{outcome}** — {reason}", "",
+        f"Model {cell(meta.get('model_requested'))}. Completed pairs with usable observations {len(observed)}/{len(pairs) + missing}.",
+        "The tables show before → after medians and the number of measured pairs in parentheses.",
+        "", "## Correctness", "",
+    ]
+    if meta.get("verification_environment") == "host":
+        lines.append("Reviewed host commands run after Codex in the candidate checkout. They can execute edited code "
+                     "with the controller's host permissions.")
+    elif meta["mode"] == "discovery":
+        lines.append("The offline oracle scores the discovery answer. Application tests are outside the discovery task.")
+    else:
+        lines.append("Host tests were not authorized. Edits and token usage were observed, and correctness is unevaluated.")
+    lines.extend(["", row("Task", "Trial", "Revision", "Agent", "Behavior", "Regression", "Provider input", "Environment"),
+                  row(*("---" for _ in range(8)))])
+    for r in runs:
+        environment = ("pytest execution observed" if r.get("agent_test_execution_observed")
+                       else r.get("environment"))
+        lines.append(row(r["task_id"], r["trial_id"], r["variant"], r.get("agent_completion"),
+                         r.get("behavior"), r.get("regression"), r.get("total_input_tokens"), environment))
+    for r in runs:
+        failures = {stage: check_status(r, stage) for stage in ("setup", "success", "regression")
+                    if any(c.get("exit_code") != 0 for c in r.get(f"{stage}_checks", []))}
+        if failures:
+            lines.append(f"- {cell(r['task_id'])}/{cell(r['trial_id'])}/{cell(r['variant'])}: "
+                         + ", ".join(f"{stage} {cell(status)}" for stage, status in failures.items()))
+    for task in meta.get("discovery_preflight", []):
+        lines.append(f"- {cell(task.get('task_id'))} {cell(task.get('variant'))} readiness {cell(task.get('status'))}.")
+    lines.extend(simple_table("Provider token usage", tasks, observed, PROVIDER))
+    lines.extend(simple_table("Discoverability", tasks, observed, (
+        ("navigation_steps", "Navigation actions"), ("search_steps", "Searches"),
+        ("files_mentioned", "Paths mentioned"), ("files_opened", "Distinct confirmed file reads"),
+        ("owner_steps", "First owner mention"),
+    )))
+    lines.extend(simple_table("Maintenance effort", tasks, observed, (
+        ("changed_files", "Paths edited"), ("changed_source_files", "Source files edited"),
+        ("changed_source_directories", "Source directories edited"),
+    )))
+    lines.extend(["", "Provider tokens cover all logged context. File and edit counts are signals of navigation "
+                  "and change scope. See results.json for per-run trace coverage, observed paths and verifier details.", ""])
+    return "\n".join(lines), outcome != "Inconclusive" and all(pass_run(r, meta["mode"]) for r in runs)
+
+
 def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
     runs = doc.get("runs")
     if not isinstance(runs, list) or not isinstance(doc.get("metadata", {}), dict):
         raise ValueError("expected benchmark metadata and a runs array")
     meta = doc.get("metadata", {})
+    if meta.get("workflow") == "simple" and not meta.get("offline_reanalysis"):
+        return render_simple_report(meta, runs)
     legacy = doc.get("schema_version") != 4
     mode = meta.get("mode", "edit")
     pairs, incomplete = pair_runs(runs)
@@ -199,7 +322,8 @@ def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
                          *(check_status(r, stage) for stage in ("setup", "success", "regression"))))
     lines.extend([
         "", "## Experiment validity", "",
-        f"- Mode {cell(mode)}, host preflight {cell(meta.get('preflight_status'))}, sandbox smoke {cell(meta.get('sandbox_smoke_status'))}.",
+        f"- Mode {cell(mode)}, verification {cell(meta.get('verification_environment'))}, "
+        f"preflight {cell(meta.get('preflight_status'))}, sandbox smoke {cell(meta.get('sandbox_smoke_status'))}.",
         f"- CLI {cell(meta.get('codex_cli_version'))}, model {cell(meta.get('model_requested'))}, "
         f"sandbox {cell(meta.get('sandbox_mode'))}, order seed {cell(meta.get('seed'))}.",
         f"- Revisions {cell(meta.get('revisions'))}. Manifest SHA-256 {cell(meta.get('manifest_sha256'))}.",
@@ -211,6 +335,24 @@ def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
         "", "| Task | Trial | Revision | Actual order | Started UTC | Environment | Provider usage | Source attribution | Output gaps | Mixed events | Unknown tools |",
         "|---|---|---|---:|---|---|---|---|---:|---:|---:|",
     ])
+    if mode == "isolated-verifier":
+        index = lines.index("## Experiment validity") + 2
+        vm = meta.get("verifier_readiness") or {}
+        binding = vm.get("binding") or {}
+        boundary = meta.get("isolated_agent_boundary") or {}
+        lines.insert(index, f"- Verifier VM {cell(vm.get('status'))}, agent boundary exit {cell(boundary.get('exit_code'))}, "
+                     f"VM profile SHA-256 {cell(binding.get('profile_sha256'))}.")
+    runtime = meta.get("sandbox_runtime")
+    if runtime:
+        index = lines.index("## Experiment validity") + 2
+        lines.insert(index, f"- Workspace-write runtime check: {cell(runtime.get('status'))} ({cell(runtime.get('reason'))}).")
+        for side in ("host", "sandbox"):
+            result = runtime.get(side) or {}
+            lines.insert(index + 1, f"- Runtime {side}: Python {cell(result.get('python_version'))}, "
+                         f"socketpair {cell(result.get('socketpair_ok'))}, errno {cell(result.get('socket_errno'))}, "
+                         f"worker completed {cell(result.get('worker_completed'))}, "
+                         f"asyncio closed {cell(result.get('asyncio_closed'))}, timeout {cell(result.get('timed_out'))}.")
+            index += 1
     if meta.get("offline_reanalysis"):
         replay = meta["offline_reanalysis"]
         lines.insert(lines.index("## Experiment validity") + 2,
@@ -228,11 +370,20 @@ def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
                          r.get("model_usage_coverage"), "legacy unknown" if legacy else r.get("source_attribution_coverage"),
                          gaps if observed else None, mixed if observed else None,
                          r.get("tool_calls_not_instrumented") if observed else None))
-    for check in meta.get("host_preflight", []) + meta.get("sandbox_smoke", []):
+    for check in (meta.get("host_preflight", []) + meta.get("sandbox_smoke", [])
+                  + meta.get("verifier_preflight", []) + meta.get("discovery_preflight", [])):
         lines.append(f"\n- {cell(check.get('task_id'))}/{cell(check.get('variant'))} preflight {cell(check.get('status'))}. "
                      f"Setup {check_status(check, 'setup')}. Success {check_status(check, 'success')}. "
                      f"Regression {check_status(check, 'regression')}. "
                      f"Reason {cell(check.get('reason'))}. Sandbox evidence {cell(check.get('evidence'))}.")
+    if mode == "isolated-verifier":
+        lines.extend(["", "### Independent VM verification", "",
+                      "| Task | Trial | Revision | VM result | Candidate SHA-256 |",
+                      "|---|---|---|---|---|"])
+        for r in runs:
+            evaluation = r.get("verification") or {}
+            lines.append(row(r["task_id"], r["trial_id"], r["variant"], evaluation.get("status"),
+                             (evaluation.get("binding") or {}).get("artifact_sha256")))
     lines.extend([
         "", "## Provider usage", "",
         "Uncached input is total input less cached input. Input includes all provider-reported context. "
@@ -242,16 +393,22 @@ def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
         "Path mentions can come from listings, commands and results. Confirmed reads require attributable content. "
         "Source bytes and regex units describe captured shell output and have no exact model-token equivalent.",
         "", *paired_table([] if legacy else comparison_pairs, tasks, NAVIGATION), "",
-        "| Task | Trial | Revision | Paths mentioned | Owner event | Confirmed reads | Observed source bytes | Mixed bytes | Discovery score | Changed source files | Parent directories |",
-        "|---|---|---|---:|---|---:|---:|---:|---|---|---:|",
+        "| Task | Trial | Revision | Paths mentioned | Owner event | Confirmed reads | Observed source bytes | Mixed bytes | Discovery score |",
+        "|---|---|---|---:|---|---:|---:|---:|---|",
     ])
     for r in runs:
         values = (len(r["files_mentioned"]) if "files_mentioned" in r else None,
                   r.get("owner_first_mention_event_id"), r.get("confirmed_source_reads"),
                   r.get("observed_source_output_bytes"), r.get("mixed_output_bytes_observed"),
-                  (r.get("discovery_score") or {}).get("passed"), r.get("changed_source_files"),
-                  r.get("changed_source_directories"))
+                  (r.get("discovery_score") or {}).get("passed"))
         lines.append(row(r["task_id"], r["trial_id"], r["variant"], *([None] * len(values) if legacy else values)))
+    lines.extend(["", "## Architecture evidence", "",
+                  "| Task | Trial | Revision | Changed source files | Parent directories |",
+                  "|---|---|---|---|---:|"])
+    for r in runs:
+        lines.append(row(r["task_id"], r["trial_id"], r["variant"],
+                         None if legacy else r.get("changed_source_files"),
+                         None if legacy else r.get("changed_source_directories")))
     lines.extend(["", "## Environment overhead", "",
                   "| Task | Trial | Revision | Observed test commands | Identical test retries | Diagnostics | Exit 124 | Runner timeouts | Agent failure reason |",
                   "|---|---|---|---:|---:|---:|---:|---:|---|"])
@@ -274,8 +431,11 @@ def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
         "NO_DEMONSTRATED_GAIN": "Review per-task results and linked observations before selecting follow-up changes.",
         "PROMISING": "Repeat on untouched holdout tasks and review whether the code remains maintainable.",
     }
+    action = next_action[outcome]
+    if runtime and runtime.get("status") == "environment_blocked":
+        action = "Restore compatibility under the intended sandbox policy and rerun the non-model runtime check."
     lines.extend(["", "## Evidence-linked hypotheses", "", *hypotheses(runs), "", "## Recommended next action", "",
-                  next_action[outcome], ""])
+                  action, ""])
     return "\n".join(lines), outcome in {"PROMISING", "NO_DEMONSTRATED_GAIN"}
 
 
