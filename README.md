@@ -38,6 +38,14 @@ After approving the planned model usage, replace `--dry-run` with `--approve-man
 - **Optional host tests** use `--allow-host-tests` in addition to model approval. First run with `--dry-run --show-commands` and review every listed command and the code it can execute. When enabled, setup and tests run after Codex in the edited worktree with the controller's host permissions, outside the Codex sandbox. Use only with trusted projects and commands. Skipped or insufficient checks leave the architecture verdict inconclusive while still showing measured usage.
 - **Advanced verification** uses [isolated-verifier mode](references/isolated-verifier.md) for an offline VM. The default flow needs no VM, Python sandbox probe or model smoke.
 
+Discovery reports keep the exact answer grade separate from whether the expected files and declarations were identified. The semantic check reads structured answer entries, verifies the expected facts against the frozen source, and leaves prose interpretation to human review. Three paired trials report per-revision medians and trial-level changes. To score an archived discovery experiment without changing its results or calling Codex, supply its original manifest and a fresh output directory.
+
+```sh
+python3 scripts/replay_discovery.py --repo /path/to/repo \
+  --archive /path/to/saved-discovery-results --manifest /path/to/original/discovery.json \
+  --out /tmp/discovery-semantic-replay
+```
+
 ## Migrate v3 traces and results
 
 v3 measured the aggregate output of some shell commands as a proxy. v4 requires a source path and attributable content. It counts visible source bytes and optional regex units. A mixed command leaves the full source total unknown while preserving any separately observed reads. Provider input, cached input, derived uncached input and output are independent metrics. The v4 schema leaves the old source-token fields null.

@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from codex_trace import navigation_invalid_reason, summarize_jsonl
 from trace_attribution import path_category, shell_body
-from discovery_oracle import PROMPT_FORMAT, owner_symbols, score_answer, valid_expected, validate_task
+from discovery_oracle import PROMPT_FORMAT, owner_symbols, score_answer, score_discovery_facts, valid_expected, validate_task
 from discovery_readiness import private_opener, probe_navigation
 from sandbox_runtime import NETWORK_DISABLED, check_runtime
 from isolated_verifier import IsolatedVerifier, REGRESSION_ASSERTION, protected_digests
@@ -576,6 +576,7 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
             elif complete:
                 score = score_answer(answer, expected, cwd)
                 record["discovery_score"] = score
+                record["discovery_semantic_score"] = score_discovery_facts(answer, expected, cwd)
                 record["behavior"] = "correct" if score["passed"] else "incorrect"
                 record["correct"] = score["passed"]
                 # Legacy verified indicates an independent oracle, which is the offline scorer here.

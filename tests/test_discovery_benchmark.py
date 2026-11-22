@@ -156,4 +156,18 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
                         else:
                             self.assertEqual(run["confirmed_source_reads"], 1)
                             self.assertTrue(run["discovery_score"]["passed"])
+                            self.assertEqual(run["discovery_semantic_score"]["status"], "pass")
                             self.assertEqual(run["source_attribution_coverage"], "complete")
+                    if attempt == "healthy":
+                        original = (out / "results.json").read_bytes()
+                        replay_out = root / "replay"
+                        replay = subprocess.run(
+                            [sys.executable, str(SCRIPTS / "replay_discovery.py"), "--repo", str(repo),
+                             "--archive", str(out), "--manifest", str(manifest), "--out", str(replay_out)],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+                        copied = json.loads((replay_out / "results.json").read_text())
+                        self.assertEqual(copied["runs"], data["runs"])
+                        self.assertEqual((out / "results.json").read_bytes(), original)
+                        self.assertIn("Offline replay", (replay_out / "report.md").read_text())

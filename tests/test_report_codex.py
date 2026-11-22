@@ -22,6 +22,20 @@ def run(task, trial, variant, tokens, **overrides):
 
 
 class ReportTests(unittest.TestCase):
+    def test_discovery_report_shows_medians_and_trial_reversal(self):
+        runs = [run("invoice", trial, side, tokens, regression="not_evaluated", confirmed_source_reads=2,
+                    discovery_score={"passed": trial != 2}, discovery_semantic_score={"status": "pass"},
+                    search_steps=3, agent={"navigation_server": {"succeeded": 5, "failed": 0, "unparsed": 0}})
+                for trial, after in enumerate((90, 110, 80), 1)
+                for side, tokens in (("before", 100), ("after", after))]
+        report, _ = render_report({"runs": runs, "metadata": {
+            "workflow": "simple", "mode": "discovery", "experiment_status": "completed",
+            "planned_run_count": 6, "model_requested": "synthetic"}})
+        self.assertIn("| invoice | after | 2/3 passed | 3/3 passed | 90 (3) | 90 (3) | 3 (3) | 2 (3) | 5 (3) |",
+                      report)
+        self.assertIn("invoice input tokens moved differently from the median paired change in trial 2 (+10).", report)
+        self.assertIn("invoice trial 2 (after) scored fail on strict grading and pass on semantic grading.", report)
+
     def test_host_green_but_sandbox_blocked_invalidates_experiment(self):
         report, eligible = render_report({
             "schema_version": 4, "metadata": {"preflight_status": "ready", "sandbox_smoke_status": "environment_blocked"},

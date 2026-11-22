@@ -24,6 +24,11 @@ NAVIGATION = (
     ("owner_steps", "Shell command of first owner mention"), ("source_output_bytes", "Attributable source bytes"),
     ("source_output_proxy_units", "Attributable source regex units"),
 )
+DISCOVERY_METRICS = (
+    ("total_input_tokens", "Input tokens"), ("uncached_input_tokens", "Uncached input"),
+    ("search_steps", "Searches"), ("confirmed_source_reads", "Confirmed source reads"),
+    ("successful_navigation_calls", "Successful navigation calls"),
+)
 
 
 def cell(value: Any) -> str:
@@ -212,6 +217,8 @@ def simple_outcome(meta: dict, pairs: list[tuple[str, dict, dict]],
             return "Inconclusive", "A preliminary usage trend requires at least three verified pairs per task with reported input."
         deltas.append(statistics.median(after - before for before, after in inputs))
     if deltas and all(n <= 0 for n in deltas) and any(n < 0 for n in deltas):
+        if mode == "discovery":
+            return "Helped", "Strictly correct discovery trials used less provider input on this benchmark. The result is task-specific."
         return "Helped", "Verified tasks used less provider input in at least one task and none used more."
     if deltas and all(n >= 0 for n in deltas) and any(n > 0 for n in deltas):
         return "Worsened", "Verified tasks used more provider input in at least one task and none used less."
@@ -242,6 +249,71 @@ def simple_table(title: str, tasks: list[str], pairs: list[tuple[str, dict, dict
             else:
                 cells.append(None)
         lines.append(row(task, *cells))
+    return lines
+
+
+def discovery_measure(run: dict, key: str) -> int | None:
+    if key == "successful_navigation_calls":
+        journal = run.get("agent", {}).get("navigation_server") or {}
+        return simple_measure(journal, "succeeded") if journal.get("unparsed") == 0 else None
+    return simple_measure(run, key)
+
+
+def discovery_scores(run: dict) -> tuple[str, str]:
+    strict = run.get("discovery_score")
+    return ("pass" if strict["passed"] else "fail") if strict else "unscored", (
+        run.get("discovery_semantic_score") or {}
+    ).get("status", "unscored")
+
+
+def discovery_comparison(tasks: list[str], runs: list[dict], pairs: list[tuple[str, dict, dict]]) -> list[str]:
+    labels = ("Strict format", "Semantic facts", *(label for _, label in DISCOVERY_METRICS))
+    lines = ["", "## Discovery scores and medians", "",
+             "Strict grading checks the exact answer fields. Semantic grading checks whether the expected "
+             "paths and declarations appear in the structured answer, regardless of field placement. "
+             "It permits extra entries and leaves the prose rationale to human review.",
+             "Medians use completed pairs with usable navigation. Parentheses show the number of measurements. "
+             "Successful calls count server replies, including replies shortened by the output limit.",
+             "", row("Task", "Revision", *labels), row(*(["---"] * (2 + len(labels))))]
+    for task in tasks:
+        for index, side in enumerate(("before", "after"), 1):
+            selected = [pair[index] for pair in pairs if pair[0] == task]
+            scores = list(zip(*(discovery_scores(run) for run in selected)))
+            totals = [f"{statuses.count('pass')}/{len(selected)} passed"
+                      + (f" ({statuses.count('unscorable') + statuses.count('unscored')} unscored)"
+                         if any(status not in {"pass", "fail"} for status in statuses) else "")
+                      for statuses in scores] if selected else [None, None]
+            medians = []
+            for key, _ in DISCOVERY_METRICS:
+                values = [value for run in selected if (value := discovery_measure(run, key)) is not None]
+                medians.append(f"{statistics.median(values):,.1f}".removesuffix(".0") + f" ({len(values)})" if values else None)
+            lines.append(row(task, side, *totals, *medians))
+
+    lines.extend(["", "## Individual discovery trials", "", row("Task", "Trial", "Revision", "Order", *labels),
+                  row(*(["---"] * (4 + len(labels))))])
+    for run in runs:
+        strict, semantic = discovery_scores(run)
+        lines.append(row(run["task_id"], run["trial_id"], run["variant"], run.get("execution_order"),
+                         strict, semantic, *(discovery_measure(run, key) for key, _ in DISCOVERY_METRICS)))
+    for run in runs:
+        strict, semantic = discovery_scores(run)
+        if (strict, semantic) != ("pass", "pass"):
+            lines.append(f"- {cell(run['task_id'])} trial {cell(run['trial_id'])} ({cell(run['variant'])}) "
+                         f"scored {cell(strict)} on strict grading and {cell(semantic)} on semantic grading.")
+    for task in tasks:
+        task_pairs = [(before, after) for name, before, after in pairs if name == task]
+        for key, label in DISCOVERY_METRICS:
+            deltas = [(before["trial_id"], after_value - before_value) for before, after in task_pairs
+                      if (before_value := discovery_measure(before, key)) is not None
+                      and (after_value := discovery_measure(after, key)) is not None]
+            if len(deltas) < 2:
+                continue
+            median = statistics.median(delta for _, delta in deltas)
+            differing = [f"{cell(trial)} ({delta:+,})" for trial, delta in deltas
+                         if (delta > 0, delta < 0) != (median > 0, median < 0)]
+            if differing:
+                lines.append(f"- {cell(task)} {label.lower()} moved differently from the median paired change "
+                             f"in trial {', '.join(differing)}.")
     return lines
 
 
@@ -309,6 +381,10 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
         )
         lines.append(f"- {cell(task.get('task_id'))} {cell(task.get('variant'))} readiness {cell(task.get('status'))}"
                      + (f" — {cell(detail)}." if detail else "."))
+    if discovery and any("discovery_semantic_score" in run for run in runs):
+        if meta.get("offline_semantic_replay"):
+            lines.extend(["", "Offline replay scored the archived answers. The original strict scores and traces were preserved."])
+        lines.extend(discovery_comparison(tasks, runs, observed))
     lines.extend(simple_table("Provider token usage", tasks, observed, PROVIDER))
     lines.extend(simple_table("Discoverability", tasks, observed, (
         ("navigation_steps", "Navigation actions"), ("search_steps", "Searches"),

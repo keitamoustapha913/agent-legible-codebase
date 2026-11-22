@@ -139,3 +139,39 @@ def score_answer(text: str | None, expected: dict, root: Path) -> dict:
     score["dependency_paths_match"] = set(dependencies) == set(expected.get("dependency_paths", []))
     score["passed"] = all(score[k] for k in ("owner_paths_match", "symbols_match", "dependency_paths_match"))
     return score
+
+
+def score_discovery_facts(text: str | None, expected: dict, root: Path) -> dict:
+    """Check source-backed declarations and path references in structured answers."""
+    if not valid_expected(expected, root):
+        return {"status": "unscorable", "reason": "expected_facts_not_in_snapshot"}
+    try:
+        answer = json.loads(text or "")
+    except (ValueError, TypeError):
+        return {"status": "unscorable", "reason": "no_structured_answer"}
+    if not isinstance(answer, dict):
+        return {"status": "unscorable", "reason": "no_structured_answer"}
+
+    paths: set[str] = set()
+    symbols: dict[str, set[str]] = {}
+    for field in ("owners", "dependency_paths"):
+        entries = answer.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if clean_path(entry):
+                paths.add(entry)
+            elif isinstance(entry, dict) and clean_path(entry.get("path")):
+                path = entry["path"]
+                paths.add(path)
+                names = entry.get("symbols")
+                if isinstance(names, list):
+                    symbols.setdefault(path, set()).update(name for name in names if symbol_name(name))
+
+    owners = owner_symbols(expected)
+    facts = {
+        "owner_paths_found": owners.keys() <= paths,
+        "owner_symbols_found": all(set(names) <= symbols.get(path, set()) for path, names in owners.items()),
+        "dependency_paths_found": set(expected.get("dependency_paths", [])) <= paths,
+    }
+    return {"status": "pass" if all(facts.values()) else "fail", **facts}

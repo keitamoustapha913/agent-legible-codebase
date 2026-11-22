@@ -11,6 +11,25 @@ import discovery_navigation
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_semantic_score_accepts_field_placement_and_requires_correct_symbol_owner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "owner.py").write_text("def calc():\n    return 2\n")
+            (root / "slide.py").write_text("def draw():\n    pass\n")
+            expected = {"owner_paths": ["owner.py"], "symbols": ["calc"], "dependency_paths": ["slide.py"]}
+            answer = {"owners": [{"path": "slide.py", "symbols": ["draw"]}],
+                      "dependency_paths": [{"path": "owner.py", "symbols": ["calc"]}, "route.py"],
+                      "rationale": "Chooses the amount and currency."}
+            self.assertFalse(discovery_oracle.score_answer(json.dumps(answer), expected, root)["passed"])
+            self.assertEqual(discovery_oracle.score_discovery_facts(json.dumps(answer), expected, root)["status"], "pass")
+            answer["owners"][0]["symbols"].append("calc")
+            answer["dependency_paths"][0]["symbols"].clear()
+            score = discovery_oracle.score_discovery_facts(json.dumps(answer), expected, root)
+            self.assertEqual(score, {"status": "fail", "owner_paths_found": True,
+                                     "owner_symbols_found": False, "dependency_paths_found": True})
+            self.assertEqual(discovery_oracle.score_discovery_facts("plain prose", expected, root)["status"],
+                             "unscorable")
+
     def test_navigation_catalog_advertises_only_read_only_tools(self):
         nav = discovery_navigation.Navigation(Path.cwd(), [])
         response = discovery_navigation.dispatch({"id": 1, "method": "tools/list"}, nav)
