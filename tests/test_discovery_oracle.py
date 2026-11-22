@@ -33,8 +33,17 @@ class DiscoveryTests(unittest.TestCase):
             nav = discovery_navigation.Navigation(root, ["owner.py", "config"])
             self.assertIn("def calc", nav.call("read", {"path": "owner.py"}))
             self.assertIn("owner.py:1:def calc", nav.call("search", {"query": "def calc"}))
+            self.assertIn("owner.py", nav.call("list_files", {"contains": None}))
+            self.assertIn("owner.py:1:def calc", nav.call("search", {"query": "def calc", "contains": None}))
+            self.assertEqual(nav.call("read", {"path": "owner.py", "start": None, "end": None}),
+                             "def calc():\n    return 2\n")
             for path in ("../expected.json", "/etc/passwd", "config", ".git"):
                 with self.assertRaises(ValueError):
                     nav.call("read", {"path": path})
             with self.assertRaises(ValueError):
                 nav.call("exec", {"command": "pytest"})
+            failure = discovery_navigation.dispatch({
+                "id": 1, "method": "tools/call", "params": {"name": "read", "arguments": {"path": "absent.py"}},
+            }, nav)["result"]
+            self.assertTrue(failure["isError"])
+            self.assertIn("not tracked", failure["content"][0]["text"])

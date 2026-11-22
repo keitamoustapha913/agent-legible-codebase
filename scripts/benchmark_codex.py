@@ -21,9 +21,10 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from codex_trace import summarize_jsonl
+from codex_trace import navigation_invalid_reason, summarize_jsonl
 from trace_attribution import path_category, shell_body
-from discovery_oracle import PROMPT_FORMAT, score_answer, valid_expected, validate_task
+from discovery_oracle import PROMPT_FORMAT, owner_symbols, score_answer, valid_expected, validate_task
+from discovery_readiness import private_opener, probe_navigation
 from sandbox_runtime import NETWORK_DISABLED, check_runtime
 from isolated_verifier import IsolatedVerifier, REGRESSION_ASSERTION, protected_digests
 from report_codex import render_report, write_private
@@ -188,13 +189,20 @@ def discovery_preflight(repo: Path, revisions: dict[str, str], tasks: list[dict]
         try:
             boundary = discovery_boundary(opts, cwd) if opts else None
             for task in tasks:
-                valid = valid_expected(task["expected"][variant], cwd)
+                expected = task["expected"][variant]
+                valid = valid_expected(expected, cwd)
                 sandbox_ready = boundary is None or boundary["exit_code"] == 0
+                navigation = None
+                if opts and valid and sandbox_ready:
+                    path, symbols = next(iter(owner_symbols(expected).items()))
+                    navigation = check_navigation(opts, cwd, root, f"readiness-{task['id']}-{variant}",
+                                                  path, symbols[0].rsplit(".", 1)[-1])
+                reason = ("read_only_sandbox_blocked" if not sandbox_ready else
+                          "discovery_expected_answer_not_in_snapshot" if not valid else
+                          navigation["reason"] if navigation else None)
                 results.append({"variant": variant, "task_id": task["id"],
-                                "status": "ready" if valid and sandbox_ready else "preflight_invalid",
-                                "reason": "read_only_sandbox_blocked" if not sandbox_ready else
-                                None if valid else "discovery_expected_answer_not_in_snapshot",
-                                "sandbox_boundary": boundary})
+                                "status": "ready" if reason is None else "preflight_invalid",
+                                "reason": reason, "sandbox_boundary": boundary, "navigation": navigation})
         finally:
             remove_worktree(repo, cwd)
     return results
@@ -334,22 +342,43 @@ raise SystemExit(1)
     return execute_command(command, cwd, opts.check_timeout)
 
 
-def codex_args(opts: argparse.Namespace, cwd: Path) -> list[str]:
+def navigation_config(opts: argparse.Namespace, cwd: Path, journal: Path | None = None) -> list[str]:
+    script = Path(__file__).resolve().with_name("discovery_navigation.py")
+    server_args = ["-B", str(script), str(cwd)]
+    if journal is not None:
+        server_args.append(str(journal))
+    profile = DISCOVERY_PROFILE if opts.mode == "discovery" else ISOLATED_PROFILE
+    permissions = discovery_permissions(opts.manifest, cwd) if opts.mode == "discovery" else isolated_permissions(opts, cwd)
+    return [
+        *permissions, "-c", f'default_permissions="{profile}"',
+        "--strict-config", "--disable", "shell_tool", "--disable", "unified_exec",
+        "--disable", "apps", "--disable", "plugins", "--disable", "hooks",
+        "-c", "web_search=" + json.dumps("disabled"),
+        "-c", f"mcp_servers.alc_navigation.command={json.dumps(sys.executable)}",
+        "-c", f"mcp_servers.alc_navigation.args={json.dumps(server_args)}",
+        "-c", "mcp_servers.alc_navigation.required=true",
+        "-c", "mcp_servers.alc_navigation.tool_timeout_sec=30",
+        "-c", f"projects.{json.dumps(str(cwd))}.trust_level=" + json.dumps("untrusted"),
+    ]
+
+
+def check_navigation(opts: argparse.Namespace, cwd: Path, root: Path, label: str, path: str, symbol: str) -> dict:
+    journal = root / f"{label}.mcp.jsonl"
+    with open(journal, "x", opener=private_opener):
+        pass
+    argv = [opts.codex, "app-server", *navigation_config(opts, cwd, journal)]
+    result = probe_navigation(argv, cwd, root, label, opts.check_timeout, path, symbol, DISCOVERY_PROFILE)
+    result["logs"]["mcp.jsonl"] = journal.name
+    if result["status"] == "ready" and journal.stat().st_size == 0:
+        result.update(status="blocked", reason="mcp_server_telemetry_missing", confirmed_source_contents=False)
+    return result
+
+
+def codex_args(opts: argparse.Namespace, cwd: Path, journal: Path | None = None) -> list[str]:
     args = [opts.codex, "-a", "never", "exec", "--json", "--ephemeral", "--cd", str(cwd)]
     if opts.mode in {"discovery", "isolated-verifier"}:
-        server_args = json.dumps(["-B", str(Path(__file__).resolve().with_name("discovery_navigation.py")), str(cwd)])
-        profile = DISCOVERY_PROFILE if opts.mode == "discovery" else ISOLATED_PROFILE
-        permissions = discovery_permissions(opts.manifest, cwd) if opts.mode == "discovery" else isolated_permissions(opts, cwd)
         args.extend([
-            *permissions, "-c", f'default_permissions="{profile}"',
-            "--strict-config", "--ignore-user-config", "--disable", "shell_tool", "--disable", "unified_exec",
-            "--disable", "apps", "--disable", "plugins", "--disable", "hooks",
-            "-c", "web_search=" + json.dumps("disabled"),
-            "-c", f"mcp_servers.alc_navigation.command={json.dumps(sys.executable)}",
-            "-c", f"mcp_servers.alc_navigation.args={server_args}",
-            "-c", "mcp_servers.alc_navigation.required=true",
-            "-c", "mcp_servers.alc_navigation.tool_timeout_sec=30",
-            "-c", f"projects.{json.dumps(str(cwd))}.trust_level=" + json.dumps("untrusted"),
+            "--ignore-user-config", *navigation_config(opts, cwd, journal),
         ])
     else:
         args.extend(["--sandbox", opts.sandbox, "-c", NETWORK_DISABLED])
@@ -362,23 +391,46 @@ def codex_args(opts: argparse.Namespace, cwd: Path) -> list[str]:
     return [*args, "-"]
 
 
+def navigation_server_counts(journal: Path) -> dict:
+    counts = {"succeeded": 0, "failed": 0, "unparsed": 0}
+    with journal.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+                if event["request"].get("method") == "tools/call":
+                    reply = event["response"]
+                    status = "failed" if "error" in reply or reply["result"].get("isError") else "succeeded"
+                    counts[status] += 1
+            except (KeyError, TypeError, ValueError, AttributeError):
+                counts["unparsed"] += 1
+    return counts
+
+
 def call_agent(opts: argparse.Namespace, cwd: Path, root: Path, label: str, prompt: str,
                read_trace: Callable[[Path], dict]) -> tuple[dict, dict]:
     # Removing the private directory also cleans partial logs on exceptions.
     with tempfile.TemporaryDirectory(prefix=".capture-", dir=root) as capture:
         trace = Path(capture) / "trace.jsonl"
         stderr_file = Path(capture) / "stderr.txt"
+        journal = root / f"{label}.mcp.jsonl" if opts.mode == "discovery" else None
+        if journal is not None:
+            with open(journal, "x", opener=private_opener):
+                pass
         with trace.open("wb") as stdout, stderr_file.open("w+b") as stderr:
-            agent = run_process(codex_args(opts, cwd), cwd, opts.timeout, stdout=stdout, stderr=stderr, prompt=prompt)
+            agent = run_process(codex_args(opts, cwd, journal), cwd, opts.timeout, stdout=stdout, stderr=stderr, prompt=prompt)
             err, info = bounded_output(stderr)
             agent["stderr"] = info
             agent["diagnostic_excerpt"] = ", ".join(diagnostic_labels(err)) or None
-        if opts.keep_raw:
+        if opts.keep_raw or journal is not None:
             for source, suffix in ((trace, ".jsonl"), (stderr_file, ".stderr.txt")):
                 raw_file = root / (label + suffix)
                 source.chmod(0o600)
                 source.replace(raw_file)
             trace = root / f"{label}.jsonl"
+            agent["raw_logs"] = [trace.name, f"{label}.stderr.txt"]
+            if journal is not None:
+                agent["raw_logs"].append(journal.name)
+                agent["navigation_server"] = navigation_server_counts(journal)
         return agent, read_trace(trace)
 
 
@@ -510,10 +562,16 @@ def collect_run(repo: Path, root: Path, task: dict[str, Any], variant: str, revi
         if status == "interrupted":
             return record
         if discovery:
+            invalid_reason = navigation_invalid_reason(record)
+            if not invalid_reason and summary["confirmed_source_reads"] and not agent["navigation_server"]["succeeded"]:
+                invalid_reason = "mcp_server_telemetry_missing"
             ignored = run_git(cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
             if edits or ignored or summary.get("file_change_events") or summary["shell_commands"] or summary["tool_calls_not_instrumented"]:
                 record["environment"] = "confounded"
                 record["discovery_violation"] = "Unexpected tool or checkout change during discovery"
+            elif invalid_reason:
+                record["environment"] = "blocked"
+                record["discovery_invalid_reason"] = invalid_reason
             elif complete:
                 score = score_answer(answer, expected, cwd)
                 record["discovery_score"] = score
@@ -658,8 +716,10 @@ def main() -> int:
         manifest_hash = hashlib.sha256(raw).hexdigest()
         if opts.mode == "discovery" and (
             repo in manifest.parents or out in manifest.parents or opts.oracle_contract or opts.sandbox_smoke
+            or opts.skip_preflight
         ):
-            raise BenchmarkError("Discovery requires an external manifest and accepts no edit oracle or sandbox test replay")
+            raise BenchmarkError("Discovery requires an external manifest and its local readiness checks; "
+                                 "edit oracles and sandbox test replay are unavailable")
         opts.manifest_sha = manifest_hash
         tasks = parse_manifest(manifest, raw=raw, mode="edit" if isolated else opts.mode,
                                require_checks=isolated or opts.qualify_sandbox)
@@ -688,6 +748,9 @@ def main() -> int:
             if opts.qualify_sandbox:
                 print(f"Advanced sandbox gate uses {opts.sandbox_probe_python or sys.executable}; requires --allow-host-tests.")
         if opts.dry_run:
+            if opts.mode == "discovery":
+                print("Read-only discovery. Local MCP content check first; no application tests. Raw logs retained privately.")
+                print("After a successful one-session navigation smoke, approve live discovery with --approve-manifest.")
             if opts.show_commands:
                 for task in tasks:
                     for stage in ("setup_commands", "success_checks", "regression_checks"):
@@ -729,7 +792,8 @@ def main() -> int:
             "planned_run_count": 0 if opts.readiness_only else len(plan),
             "planned_model_session_count": 0 if opts.readiness_only else len(plan) + smoke_count,
             "planned_order": [
-                {"task_id": t["id"], "trial_id": trial, "variant": v} for t, trial, v in plan], "raw_logs_retained": opts.keep_raw,
+                {"task_id": t["id"], "trial_id": trial, "variant": v} for t, trial, v in plan],
+            "raw_logs_retained": opts.keep_raw or opts.mode == "discovery",
             "study_kind": "instrumentation_pilot" if opts.trials == 1 else "performance_study",
             "codex_cli_version": resolve_cli_version(opts.codex, out, opts.check_timeout),
             "git_version": run_git(repo, "--version"),
@@ -807,7 +871,8 @@ def main() -> int:
                 results.append(run)
                 write_json(out / "results.partial.json", {"schema_version": 4, "metadata": meta, "runs": results})
                 if run["environment"] in {"blocked", "confounded"}:
-                    meta["experiment_status"] = f"environment_{run['environment']}"
+                    meta["experiment_status"] = ("invalid" if run.get("discovery_invalid_reason") else
+                                                 f"environment_{run['environment']}")
                     return 2
                 if run["agent_completion"] == "interrupted":
                     meta["experiment_status"] = "interrupted"

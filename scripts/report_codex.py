@@ -12,7 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from codex_trace import summarize_jsonl
+from codex_trace import navigation_invalid_reason, summarize_jsonl
 
 PROVIDER = (
     ("total_input_tokens", "Total input"), ("cached_input_tokens", "Cached input"),
@@ -249,8 +249,14 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
     pairs, missing = pair_runs(runs)
     tasks = sorted({r["task_id"] for r in runs} | set(meta.get("task_ids", [])))
     outcome, reason = simple_outcome(meta, pairs, tasks, missing, len(runs))
+    discovery = meta["mode"] == "discovery"
+    unusable = {id(r): r.get("discovery_invalid_reason") or navigation_invalid_reason(r)
+                for r in runs} if discovery else {}
+    if discovery and (any(unusable.values()) or meta.get("experiment_status") in
+                      {"invalid", "environment_blocked", "environment_confounded"}):
+        outcome, reason = "INVALID", "Discovery readiness or navigation evidence failed. The runs cannot measure architecture."
     observed = [p for p in pairs if all(r.get("agent_completion") == "completed" and
-                                      r.get("environment") == "ready" for r in p[1:])]
+                                      r.get("environment") == "ready" and not unusable.get(id(r)) for r in p[1:])]
     lines = [
         "# Codex benchmark", "", f"**{outcome}** — {reason}", "",
         f"Model {cell(meta.get('model_requested'))}. Completed pairs with usable observations {len(observed)}/{len(pairs) + missing}.",
@@ -270,15 +276,39 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
         environment = ("pytest execution observed" if r.get("agent_test_execution_observed")
                        else r.get("environment"))
         lines.append(row(r["task_id"], r["trial_id"], r["variant"], r.get("agent_completion"),
-                         r.get("behavior"), r.get("regression"), r.get("total_input_tokens"), environment))
+                         "unevaluated" if unusable.get(id(r)) else r.get("behavior"),
+                         r.get("regression"), r.get("total_input_tokens"),
+                         "INVALID" if unusable.get(id(r)) else environment))
     for r in runs:
         failures = {stage: check_status(r, stage) for stage in ("setup", "success", "regression")
                     if any(c.get("exit_code") != 0 for c in r.get(f"{stage}_checks", []))}
         if failures:
             lines.append(f"- {cell(r['task_id'])}/{cell(r['trial_id'])}/{cell(r['variant'])}: "
                          + ", ".join(f"{stage} {cell(status)}" for stage, status in failures.items()))
+        if discovery:
+            label = f"{cell(r['task_id'])}/{cell(r['trial_id'])}/{cell(r['variant'])}"
+            if unusable.get(id(r)):
+                lines.append(f"- {label} invalid navigation — {cell(unusable[id(r)])}.")
+            for event in r.get("events", []):
+                if event.get("event_type") == "mcp_tool_call" and (
+                    event.get("navigation_failure") or event.get("output_status") != "available"
+                ):
+                    lines.append(f"- {label} JSONL line {event.get('event_line')} "
+                                 f"{cell(event.get('tool', event.get('category')))} — "
+                                 f"{cell(event.get('navigation_failure') or event.get('execution_status'))}, "
+                                 f"output {cell(event.get('output_status'))}.")
+            if r.get("agent", {}).get("raw_logs"):
+                lines.append(f"- {label} private raw logs — " + ", ".join(map(cell, r["agent"]["raw_logs"])) + ".")
+            journal = r.get("agent", {}).get("navigation_server")
+            if journal is not None:
+                lines.append(f"- {label} MCP server recorded {journal['succeeded']} successful and "
+                             f"{journal['failed']} failed tool replies.")
     for task in meta.get("discovery_preflight", []):
-        lines.append(f"- {cell(task.get('task_id'))} {cell(task.get('variant'))} readiness {cell(task.get('status'))}.")
+        detail = task.get("reason") or (
+            "listing, search and source contents confirmed through local Codex MCP" if task.get("navigation") else None
+        )
+        lines.append(f"- {cell(task.get('task_id'))} {cell(task.get('variant'))} readiness {cell(task.get('status'))}"
+                     + (f" — {cell(detail)}." if detail else "."))
     lines.extend(simple_table("Provider token usage", tasks, observed, PROVIDER))
     lines.extend(simple_table("Discoverability", tasks, observed, (
         ("navigation_steps", "Navigation actions"), ("search_steps", "Searches"),
@@ -291,7 +321,7 @@ def render_simple_report(meta: dict, runs: list[dict]) -> tuple[str, bool]:
     )))
     lines.extend(["", "Provider tokens cover all logged context. File and edit counts are signals of navigation "
                   "and change scope. See results.json for per-run trace coverage, observed paths and verifier details.", ""])
-    return "\n".join(lines), outcome != "Inconclusive" and all(pass_run(r, meta["mode"]) for r in runs)
+    return "\n".join(lines), outcome not in {"Inconclusive", "INVALID"} and all(pass_run(r, meta["mode"]) for r in runs)
 
 
 def render_report(doc: dict[str, Any]) -> tuple[str, bool]:
@@ -470,6 +500,7 @@ def reanalyze(doc: dict, trace_dir: Path, *, owners: dict | None = None,
             summary = summarize_jsonl(
                 raw, (owners or {}).get(task, {}).get(variant, []),
                 repo_root=(worktree_root or trace_dir) / label, relative_cwd_known=assume_root_cwd,
+                discovery_tools=meta.get("mode") in {"discovery", "isolated-verifier"},
             )
             row_data.update(summary)
             row_data["raw_trace_status"] = "reclassified"

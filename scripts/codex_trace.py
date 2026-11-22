@@ -130,19 +130,26 @@ def navigation_evidence(item: dict, item_id: str, step: int, line: int, root: Pa
         category = path_category(raw_path, root, root) if path else "other"
     result = item.get("result")
     blocks = result.get("content") if isinstance(result, dict) else None
-    text = blocks[0].get("text") if isinstance(blocks, list) and len(blocks) == 1 and isinstance(blocks[0], dict) else None
+    text = "".join(block["text"] for block in blocks) if (
+        isinstance(blocks, list) and blocks and
+        all(isinstance(block, dict) and block.get("type") == "text" and
+            isinstance(block.get("text"), str) for block in blocks)
+    ) else None
     status = "missing"
     if isinstance(text, str):
         status = "truncated" if re.search(r"(?i)truncated by navigation tool|tokens truncated", text) else "available"
-    usable = (
-        status == "available" and item.get("status") == "completed" and not item.get("error")
-        and not result.get("isError") and text != "Navigation request rejected or unsupported."
-    )
+    tool_error = isinstance(result, dict) and result.get("isError") is True
+    failure = ("codex_tool_error" if item.get("error") else
+               "mcp_returned_error" if tool_error else
+               "tool_call_failed" if item.get("status") == "failed" else
+               "missing_tool_result" if status == "missing" else
+               "unconfirmed_tool_status" if item.get("status") != "completed" else None)
+    usable = status == "available" and failure is None
     size = len(text.encode("utf-8", errors="replace")) if isinstance(text, str) else None
     attribution = "unknown"
     source_bytes = source_units = None
-    paths = mentions(text or "", root, root)
-    if path:
+    paths = mentions(text, root, root) if usable else set()
+    if path and usable:
         paths.add(path)
     source_paths = []
     if usable and (category == "source_read" or category == "source_search" and scoped_search(text, root, root)):
@@ -161,10 +168,28 @@ def navigation_evidence(item: dict, item_id: str, step: int, line: int, root: Pa
         "attribution_status": attribution, "source_output_bytes": source_bytes,
         "source_output_proxy_units": source_units, "source_paths_read": source_paths,
         "paths_mentioned": sorted(paths)[:100], "exit_code": None, "execution_status": item.get("status"),
+        "tool": tool, "navigation_failure": failure,
         "output_missing_or_empty": status == "missing",
         "search_fingerprint": hashlib.sha256(json.dumps(args, sort_keys=True).encode()).hexdigest()[:12]
         if tool == "search" else None,
     }
+
+
+def navigation_invalid_reason(run: dict) -> str | None:
+    """Use only evidence of usable navigation, including on archived summaries."""
+    events = [e for e in run.get("events", []) if e.get("event_type") == "mcp_tool_call"]
+    if run.get("unfinished_commands") or any(
+        e.get("output_status") == "missing" and e.get("execution_status") != "failed"
+        for e in events
+    ):
+        return "navigation_results_missing"
+    if events and not any(e.get("output_status") == "available" and
+                          e.get("execution_status") == "completed" and not e.get("navigation_failure")
+                          for e in events):
+        return "no_usable_navigation_results"
+    if run.get("agent_completion") == "completed" and not run.get("confirmed_source_reads"):
+        return "no_confirmed_source_read"
+    return None
 
 
 def summarize_jsonl(path: Path, owners: list[str] | None = None, *,
@@ -298,11 +323,12 @@ def main() -> int:
     p.add_argument("--owner", action="append", default=[], help="Expected owner path, not sent to Codex")
     p.add_argument("--repo-root", type=Path, help="Repository root in the captured trace")
     p.add_argument("--unknown-cwd", action="store_true", help="Attribute relative paths only with recorded command cwd")
+    p.add_argument("--discovery-tools", action="store_true", help="Recognize scoped discovery MCP navigation")
     p.add_argument("--output", type=Path, help="Write sanitized structured trace to JSON")
     opts = p.parse_args()
     try:
         summary = summarize_jsonl(opts.jsonl, opts.owner, repo_root=opts.repo_root,
-                                  relative_cwd_known=not opts.unknown_cwd)
+                                  relative_cwd_known=not opts.unknown_cwd, discovery_tools=opts.discovery_tools)
     except OSError as exc:
         print(f"Unable to parse trace: {exc}", file=sys.stderr)
         return 2

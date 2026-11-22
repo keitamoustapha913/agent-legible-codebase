@@ -13,13 +13,13 @@ MAX_RESPONSE = 16000
 MAX_FILE = 512 * 1024
 TOOLS = [
     {"name": "list_files", "description": "List tracked paths, optionally using a literal path substring.",
-     "inputSchema": {"type": "object", "properties": {"contains": {"type": "string"}}, "additionalProperties": False}},
+     "inputSchema": {"type": "object", "properties": {"contains": {"type": ["string", "null"]}}, "additionalProperties": False}},
     {"name": "search", "description": "Find a literal snippet in tracked text files. Returns path, line number and match.",
-     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "contains": {"type": "string"}},
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "contains": {"type": ["string", "null"]}},
                      "required": ["query"], "additionalProperties": False}},
     {"name": "read", "description": "Read a tracked text file, optionally limiting to lines start through end.",
-     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "start": {"type": "integer"},
-                                                     "end": {"type": "integer"}},
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "start": {"type": ["integer", "null"]},
+                                                     "end": {"type": ["integer", "null"]}},
                      "required": ["path"], "additionalProperties": False}},
 ]
 
@@ -43,13 +43,17 @@ class Navigation:
 
     def call(self, name: str, arguments: dict) -> str:
         if name == "read":
-            start = arguments.get("start", 1)
-            end = arguments.get("end", start + 199) if type(start) is int else None
+            start = arguments.get("start")
+            start = 1 if start is None else start
+            end = arguments.get("end")
+            if end is None and type(start) is int:
+                end = start + 199
             if type(start) is not int or type(end) is not int or not 1 <= start <= end <= start + 199:
                 raise ValueError("Specify a valid range of up to 200 lines")
             lines = self.read_lines(arguments.get("path"))
             return "".join(lines[start - 1:end])
-        contains = arguments.get("contains", "")
+        contains = arguments.get("contains")
+        contains = "" if contains is None else contains
         if not isinstance(contains, str):
             raise ValueError("Expected a literal path filter")
         paths = (p for p in self.paths if contains.casefold() in p.casefold())
@@ -64,7 +68,7 @@ class Navigation:
         deadline = time.monotonic() + 8
         for path in paths:
             if time.monotonic() >= deadline:
-                return "\\n".join(found) + "\\n[Output truncated by navigation tool]"
+                return "\n".join(found) + "\n[Output truncated by navigation tool]"
             try:
                 for number, line in enumerate(self.read_lines(path), 1):
                     if query.casefold() in line.casefold():
@@ -92,8 +96,13 @@ def dispatch(request: dict, navigation: Navigation) -> dict | None:
             if len(output) > MAX_RESPONSE:
                 output = output[:MAX_RESPONSE] + "\n[Output truncated by navigation tool]"
             result = {"content": [{"type": "text", "text": output}], "isError": False}
-        except (AttributeError, KeyError, TypeError, ValueError, OSError):
-            result = {"content": [{"type": "text", "text": "Navigation request rejected or unsupported."}], "isError": True}
+        except UnicodeError:
+            result = {"content": [{"type": "text", "text": "File is not UTF-8 text."}], "isError": True}
+        except ValueError as exc:
+            result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+        except (AttributeError, KeyError, TypeError, OSError):
+            result = {"content": [{"type": "text", "text": "Navigation request rejected or file unavailable."}],
+                      "isError": True}
     elif method == "ping":
         result = {}
     else:
@@ -101,18 +110,29 @@ def dispatch(request: dict, navigation: Navigation) -> dict | None:
     return {"jsonrpc": "2.0", "id": request["id"], "result": result}
 
 
-def main() -> int:
-    root = Path(sys.argv[1]).resolve(strict=True)
-    listing = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"], timeout=15)
-    navigation = Navigation(root, listing.decode("utf-8", errors="replace").split("\x00")[:-1])
+def serve(navigation: Navigation, journal=None) -> None:
     for line in sys.stdin:
         try:
             request = json.loads(line)
             response = dispatch(request, navigation)
         except (ValueError, TypeError):
             continue
+        if journal is not None:
+            print(json.dumps({"request": request, "response": response}), file=journal, flush=True)
         if response is not None:
             print(json.dumps(response), flush=True)
+
+
+def main() -> int:
+    root = Path(sys.argv[1]).resolve(strict=True)
+    listing = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"], timeout=15)
+    navigation = Navigation(root, listing.decode("utf-8", errors="replace").split("\x00")[:-1])
+    if len(sys.argv) > 2:
+        # The controller creates this private file outside the worktree.
+        with Path(sys.argv[2]).open("a", encoding="utf-8") as journal:
+            serve(navigation, journal)
+    else:
+        serve(navigation)
     return 0
 
 

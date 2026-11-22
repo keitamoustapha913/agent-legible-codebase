@@ -34,9 +34,9 @@ python3 scripts/benchmark_codex.py --repo /path/to/project \
 After approving the planned model usage, replace `--dry-run` with `--approve-manifest`. Each task runs once per revision per trial in a fresh disposable worktree using `codex exec --json`. Open `report.md` for the outcome, correctness, tokens, searches, file visits and edit scope. Use three or more pairs per task for a preliminary trend.
 
 - **Edit is the default.** Codex can inspect and edit in its normal restricted workspace. The prompt tells it to leave pytest to the controller. Setup and host checks are skipped by default.
-- **Discovery** uses `--mode discovery` and a [discovery manifest](examples/tasks.discovery.example.json). Codex inspects tracked files through read-only tools. The offline oracle scores the answer and no application tests run.
+- **Discovery** uses `--mode discovery` and a discovery manifest. Run `--readiness-only` to verify that Codex's local tool client receives source contents with zero model sessions. When qualifying a new setup, approve one synthetic session with `scripts/discovery_smoke.py` before running blind trials. Discovery retains private raw tool logs and marks unusable navigation **INVALID**. The offline oracle scores the answer and no application tests run. [Discovery manifest](examples/tasks.discovery.example.json)
 - **Optional host tests** use `--allow-host-tests` in addition to model approval. First run with `--dry-run --show-commands` and review every listed command and the code it can execute. When enabled, setup and tests run after Codex in the edited worktree with the controller's host permissions, outside the Codex sandbox. Use only with trusted projects and commands. Skipped or insufficient checks leave the architecture verdict inconclusive while still showing measured usage.
-- **Advanced verification** uses [isolated-verifier mode](references/isolated-verifier.md) for an offline VM. The default flow needs no VM, Python sandbox probe or model smoke. [Sales example and readiness](references/sales-pilot-readiness.md)
+- **Advanced verification** uses [isolated-verifier mode](references/isolated-verifier.md) for an offline VM. The default flow needs no VM, Python sandbox probe or model smoke.
 
 ## Migrate v3 traces and results
 
@@ -77,4 +77,5 @@ Tests use synthetic JSONL, temporary Git repositories, independent test commands
 - `scripts/benchmark_codex.py` plans trials and coordinates approvals, preflight, execution and cleanup. `environment_probe.py` owns subprocess limits, diagnostics and fingerprints.
 - `scripts/codex_trace.py` normalizes JSONL and independent usage and source metrics. `trace_attribution.py` classifies supported shell commands.
 - `scripts/discovery_navigation.py` serves scoped listing, search and read operations. `discovery_oracle.py` validates and grades the answers offline.
+- `scripts/discovery_readiness.py` checks source delivery through Codex's local MCP client. `discovery_smoke.py` checks delivery to the model in one separately approved synthetic session.
 - `scripts/report_codex.py` reports validity and per-task measurements and can replay old JSONL. `compare_traces.py` supports saved before/after files.
